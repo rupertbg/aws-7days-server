@@ -1,0 +1,15 @@
+AWSTemplateFormatVersion:          '2010-09-09'
+Description:                       'Elastic IP for 7 Days to Die'
+
+Resources:
+  EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+Outputs:
+  VolumeId:
+    Description: EIP of 7days server
+    Value: !GetAtt EIP.AllocationId
+    Export:
+      Name: Seven-Days-Server-Address

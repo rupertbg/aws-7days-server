@@ -1,0 +1,344 @@
+AWSTemplateFormatVersion:          '2010-09-09'
+Description:                       'EC2 Instance that serves 7 Days to Die'
+
+Parameters:
+
+  VpcId:
+    Type:                          AWS::EC2::VPC::Id
+    Description:                   VPC to use
+
+  InstanceType:
+    Description:                   EC2 instance type
+    Type:                          String
+    Default:                       c5.xlarge
+
+  AMI:
+    Type:                          AWS::EC2::Image::Id
+    Description:                   An Amazon Linux 2 AMI
+    Default:                       ami-0b84d2c53ad5250c2
+
+  KeyPair:
+    Type:                          AWS::EC2::KeyPair::KeyName
+    Description:                   Name of SSH keypair
+    Default:                       seven-days-server
+
+  S3BucketName:
+    Type:                          AWS::SSM::Parameter::Value<String>
+    Description:                   S3 bucket name to put IP and port of server
+    Default:                       7days-server-ip-bucket
+
+  PortNumber:
+    Type:                          Number
+    Description:                   Port number for server
+    Default:                       27900
+
+  PortNumberTop:
+    Type:                          Number
+    Description:                   Top end port number for server
+    Default:                       27902
+
+  SteamUsername:
+    Type:                          AWS::SSM::Parameter::Value<String>
+    Description:                   Username for Steam
+    Default:                       steam-username
+
+  SteamPassword:
+    Type:                          AWS::SSM::Parameter::Value<String>
+    Description:                   Password for Steam
+    Default:                       steam-password
+
+  ServerPassword:
+    Type:                          AWS::SSM::Parameter::Value<String>
+    Description:                   Password for server
+    Default:                       7days-password
+  
+  WorldGenSeed:
+    Type:                          String
+    Description:                   Seed for random gen map
+    Default:                       guhishaduas78124
+
+Resources:
+
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-ec2
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - ec2.amazonaws.com
+          Action:
+            - sts:AssumeRole
+      Path:                        /
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-s3
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - !Sub arn:aws:s3:::${S3BucketName}/7dserver.txt
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EC2InstanceRole
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Ref AWS::StackName
+      GroupDescription: Security group for 7dtd server
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: !Ref PortNumber
+          ToPort: !Ref PortNumberTop
+          IpProtocol: udp
+
+  DiskAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: xvdc
+      InstanceId: !Ref EC2Instance
+      VolumeId: !ImportValue Seven-Days-Server-Disk
+
+  EIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !ImportValue Seven-Days-Server-Address
+      InstanceId: !Ref EC2Instance
+
+  EC2Instance:
+    Type:                          AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            /opt/games/7days/listplayers.sh:
+              content: !Sub |
+                #!/usr/bin/expect
+                set timeout 20
+                spawn telnet localhost 8081
+                expect -re "Please enter password:"
+                send "${ServerPassword}\r"
+                expect -re "end session."
+                send "listplayers\r"
+                expect -re "in the game"
+                send "exit\r"
+              mode: "000755"
+              owner: "root"
+              group: "root"
+            /etc/cron.hourly/idleshutdown.sh:
+              content: |
+                #!/bin/bash
+                output=$(/opt/games/7days/listplayers.sh);
+                number=$(echo "$output" | grep "in the game" | grep -Eo "[0-9]{1,4}");
+                if [ "$number" -eq "0" ]; then
+                  shutdown -h now;
+                fi;
+              mode: "000755"
+              owner: "root"
+              group: "root"
+            /opt/games/7days/customconfig.xml:
+              content: !Sub |
+                <?xml version="1.0"?>
+                <ServerSettings>
+                  <property name="ServerPort" value="${PortNumber}"/>
+                  <!-- Port you want the server to listen on. -->
+                  <property name="ServerVisibility" value="1"/>
+                  <!-- Visibility of this server: 2 = public, 1 = only shown to friends, 0 = not listed. As you are never friend of a dedicated server setting this to "1" will only work when the first player connects manually by IP. -->
+                  <property name="ServerName" value="Ru's 7dtd Server"/>
+                  <!-- Whatever you want the name of the server to be. -->
+                  <property name="ServerPassword" value="${ServerPassword}"/>
+                  <!-- Password to gain entry to the server -->
+                  <property name="ServerMaxPlayerCount" value="8"/>
+                  <!-- Maximum Concurrent Players -->
+                  <property name="ServerReservedSlots" value="0"/>
+                  <!-- Out of the MaxPlayerCount this many slots can only be used by players with a specific permission level -->
+                  <property name="ServerReservedSlotsPermission" value="100"/>
+                  <!-- Required permission level to use reserved slots above -->
+                  <property name="ServerAdminSlots" value="0"/>
+                  <!-- This many admins can still join even if the server has reached MaxPlayerCount -->
+                  <property name="ServerAdminSlotsPermission" value="0"/>
+                  <!-- Required permission level to use the admin slots above -->
+                  <property name="ServerDescription" value="A 7 Days to Die server"/>
+                  <!-- Whatever you want the server description to be, will be shown in the server browser. -->
+                  <property name="ServerWebsiteURL" value=""/>
+                  <!-- Website URL for the server, will be shown in the serverbrowser as a clickable link -->
+                  <property name="ServerDisabledNetworkProtocols" value=""/>
+                  <!-- Networking protocols that should not be used. Separated by comma. Possible values: LiteNetLib, SteamNetworking. Dedicated servers should disable SteamNetworking if there is no NAT router in between your users and the server or when
+                  port-forwarding is set up correctly -->
+                  <property name="GameWorld" value="RWG"/>
+                  <!-- RWG (see WorldGenSeed and WorldGenSize options below) or any already existing world name in the Worlds folder (currently shipping with Navezgane) -->
+                  <property name="WorldGenSeed" value="${WorldGenSeed}"/>
+                  <!-- If RWG this is the seed for the generation of the new world. If a world with the resulting name already exists it will simply load it -->
+                  <property name="WorldGenSize" value="2048"/>
+                  <!-- If RWG this controls the width and height of the created world. It is also used in combination with WorldGenSeed to create the internal RWG seed thus also creating a unique map name even if using the same WorldGenSeed. Has to be between 2048 and
+                  16384, though large map sizes will take long to generate / download / load -->
+                  <property name="GameName" value="Midway"/>
+                  <!-- Whatever you want the game name to be. This affects the save game name as well as the seed used when placing decoration (trees etc) in the world. It does not control the generic layout of the world if creating an RWG world -->
+                  <property name="GameDifficulty" value="3"/>
+                  <!-- 0 - 5, 0=easiest, 5=hardest -->
+                  <property name="GameMode" value="GameModeSurvival"/>
+                  <!-- GameModeSurvival -->
+                  <property name="ZombiesRun" value="0"/>
+                  <!-- OLD! 0 = default day/night walk/run, 1 = never run, 2 = always run; this setting ONLY affects regular zombies, some zombies like ferals always run -->
+                  <property name="ZombieMove" value="0"/>
+                  <!-- 0-4 (walk, jog, run, sprint, nightmare) -->
+                  <property name="ZombieMoveNight" value="3"/>
+                  <!-- 0-4 (walk, jog, run, sprint, nightmare) -->
+                  <property name="ZombieFeralMove" value="3"/>
+                  <!-- 0-4 (walk, jog, run, sprint, nightmare) -->
+                  <property name="ZombieBMMove" value="3"/>
+                  <!-- 0-4 (walk, jog, run, sprint, nightmare) -->
+                  <property name="BuildCreate" value="false"/>
+                  <!-- cheat mode on/off -->
+                  <property name="DayNightLength" value="60"/>
+                  <!-- real time minutes per in game day: 60 minutes -->
+                  <property name="DayLightLength" value="18"/>
+                  <!-- in game hours the sun shines per day: 18 hours day light per in game day -->
+                  <property name="PlayerKillingMode" value="3"/>
+                  <!-- Player Killing Settings (0 = No Killing, 1 = Kill Allies Only, 2 = Kill Strangers Only, 3 = Kill Everyone) -->
+                  <property name="PersistentPlayerProfiles" value="false"/>
+                  <!-- If disabled a player can join with any selected profile. If true they will join with the last profile they joined with -->
+                  <property name="PlayerSafeZoneLevel" value="5"/>
+                  <!-- If a player is less or equal this level he will create a safe zone (no enemies) when spawned -->
+                  <property name="PlayerSafeZoneHours" value="5"/>
+                  <!-- Hours in world time this safe zone exists -->
+                  <property name="ControlPanelEnabled" value="true"/>
+                  <!-- Enable/Disable the web control panel -->
+                  <property name="ControlPanelPort" value="8080"/>
+                  <!-- Port of the control panel webpage -->
+                  <property name="ControlPanelPassword" value="${ServerPassword}"/>
+                  <!-- Password to gain entry to the control panel -->
+                  <property name="TelnetEnabled" value="true"/>
+                  <!-- Enable/Disable the telnet -->
+                  <property name="TelnetPort" value="8081"/>
+                  <!-- Port of the telnet server -->
+                  <property name="TelnetPassword" value="${ServerPassword}"/>
+                  <!-- Password to gain entry to telnet interface. If no password is set the server will only listen on the local loopback interface -->
+                  <property name="TelnetFailedLoginLimit" value="3"/>
+                  <!-- After this many wrong passwords from a single remote client the client will be blocked from connecting to the Telnet interface -->
+                  <property name="TelnetFailedLoginsBlocktime" value="31536000"/>
+                  <!-- How long will the block persist (in seconds) -->
+                  <property name="TerminalWindowEnabled" value="false"/>
+                  <!-- Show a terminal window for log output / command input (Windows only) -->
+                  <property name="AdminFileName" value="serveradmin.xml"/>
+                  <!-- Server admin file name. Path relative to the SaveGameFolder -->
+                  <property name="DropOnDeath" value="2"/>
+                  <!-- 0 = everything, 1 = toolbelt only, 2 = backpack only, 3 = delete all -->
+                  <property name="DropOnQuit" value="0"/>
+                  <!-- 0 = nothing, 1 = everything, 2 = toolbelt only, 3 = backpack only -->
+                  <property name="BloodMoonEnemyCount" value="8"/>
+                  <!-- The number of zombies spawned during blood moons per player. -->
+                  <property name="EnemySpawnMode" value="true"/>
+                  <!-- Enable/Disable enemy spawning -->
+                  <property name="EnemyDifficulty" value="0"/>
+                  <!-- 0 = Normal, 1 = Feral -->
+                  <property name="BlockDurabilityModifier" value="100"/>
+                  <!-- percentage in whole numbers -->
+                  <property name="LootAbundance" value="100"/>
+                  <!-- percentage in whole numbers -->
+                  <property name="LootRespawnDays" value="30"/>
+                  <!-- days in whole numbers -->
+                  <property name="LandClaimSize" value="41"/>
+                  <!-- Size in blocks that is protected by a keystone -->
+                  <property name="LandClaimDeadZone" value="30"/>
+                  <!-- Keystones must be this many blocks apart (unless you are friends with the other player) -->
+                  <property name="LandClaimExpiryTime" value="3"/>
+                  <!-- The number of days a player can be offline before their claims expire and are no longer protected -->
+                  <property name="LandClaimDecayMode" value="0"/>
+                  <!-- Controls how offline players land claims decay. All claims have full protection for the first 24hrs. 0=Linear, 1=Exponential, 2=Full protection until claim is expired. -->
+                  <property name="LandClaimOnlineDurabilityModifier" value="4"/>
+                  <!-- How much protected claim area block hardness is increased when a player is online. 0 means infinite (no damage will ever be taken). Default is 4x -->
+                  <property name="LandClaimOfflineDurabilityModifier" value="4"/>
+                  <!-- How much protected claim area block hardness is increased when a player is offline. 0 means infinite (no damage will ever be taken). Default is 4x -->
+                  <property name="PartySharedKillRange" value="100"/>
+                  <!-- The distance you must be within to receive party shared kill xp and quest party kill objective credit. -->
+                  <property name="AirDropFrequency" value="72"/>
+                  <!-- How often airdrop occur in game-hours, 0 == never -->
+                  <property name="AirDropMarker" value="true"/>
+                  <!-- Sets if a marker is added to map/compass for air drops. -->
+                  <property name="MaxSpawnedZombies" value="50"/>
+                  <!-- Making this number too large (more than about 80) may cause servers to run at poor framerates which will effect lag and play quality for clients. -->
+                  <!-- If your server has a large number of players you can increase this limit to add more wildlife. Animals don't consume as much CPU as zombies. NOTE: That this doesn't cause more animals to spawn arbitrarily: The biome spawning system only spawns a
+                  certain number of animals in a given area, but if you have lots of players that are all spread out then you may be hitting the limit and can increase it. -->
+                  <property name="MaxSpawnedAnimals" value="50"/>
+                  <property name="EACEnabled" value="false"/>
+                  <!-- Enables/Disables EasyAntiCheat -->
+                  <property name="HideCommandExecutionLog" value="0"/>
+                  <!-- Hide logging of command execution. 0 = show everything, 1 = hide only from Telnet/ControlPanel, 2 = also hide from remote game clients, 3 = hide everything -->
+                  <property name="MaxUncoveredMapChunksPerPlayer" value="131072"/>
+                  <!-- Override how many chunks can be uncovered on the ingame map by each player. Resulting max map file size limit per player is (x * 512 Bytes), uncovered area is (x * 256 m?). Default 131072 means max 32 km? can be uncovered at any time -->
+                  <property name="BedrollDeadZoneSize" value="15"/>
+                  <!-- Size of bedroll deadzone, no zombies will spawn inside this area, and any cleared sleeper volumes that touch a bedroll deadzone will not spawn after they've been cleared. -->
+                  <!--property name="SaveGameFolder" value="absolute path" /-->
+                  <!-- use this to override the default save game path -->
+                  <property name="ServerLoginConfirmationText" value=""/>
+                  <!-- If set the user will see the message during joining the server and has to confirm it before continuing -->
+                  <!-- There are several game settings that you cannot change when starting a new game. You can use console commands to change at least some of them ingame. setgamepref BedrollDeadZoneSize 30 -->
+                </ServerSettings>
+              mode: "000755"
+              owner: "root"
+              group: "root"
+    Properties:
+      ImageId:                     !Ref AMI
+      AvailabilityZone:            !Sub ${AWS::Region}a
+      InstanceType:                !Ref InstanceType
+      IamInstanceProfile:          !Ref EC2InstanceProfile
+      KeyName:                     !Ref KeyPair
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      Tags:
+        - Key: AccessControl
+          Value: 7Days
+        - Key: Name
+          Value: 7DaysServer
+      UserData:
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash
+            set -euxo pipefail;
+            # Packages
+            yum update -y;
+            yum install -y expect telnet glibc.i686 libstdc++.i686 libstdc++48.i686 libgcc_s.so.1 mesa-libGLU libXcursor libXrandr;
+
+            # Attempt disk attachment
+            mkdir /opt/games;
+            mkfs.ext4 /dev/xvdc;
+            echo "/dev/xvdc   /opt/games  ext4    defaults,noatime  1   1" >> /etc/fstab;
+            mount /opt/games;
+
+            # cfn-init
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region};
+
+            # Steam client
+            mkdir /opt/games/steamcmd/ && cd /opt/games/steamcmd/;
+            wget http://media.steampowered.com/installer/steamcmd_linux.tar.gz;
+            tar -xzvf steamcmd_linux.tar.gz && rm -f steamcmd_linux.tar.gz;
+
+            # 7 Days to Die
+            /opt/games/steamcmd/steamcmd.sh +login ${SteamUsername} ${SteamPassword} +force_install_dir /opt/games/7days +app_update 294420 +exit;
+            (crontab -l 2>/dev/null; echo "@reboot /opt/games/7days/startserver.sh -configfile=/opt/games/7days/customconfig.xml &") | crontab -;
+            /opt/games/7days/startserver.sh -configfile=/opt/games/7days/customconfig.xml &
+
+            # Update IP address on s3 bucket
+            IPADDRESS=$(curl http://169.254.169.254/latest/meta-data/public-ipv4);
+            echo "$IPADDRESS:${PortNumber}" > 7dserver.txt;
+            aws s3 cp 7dserver.txt s3://${S3BucketName};
+
+Outputs:
+  InstanceIP:
+    Description: Instance ID of 7days server
+    Value: !Ref EC2Instance
+    Export:
+      Name: Seven-Days-Server-Instance

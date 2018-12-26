@@ -1,0 +1,17 @@
+AWSTemplateFormatVersion:          '2010-09-09'
+Description:                       'EC2 Volume that serves 7 Days to Die'
+
+Resources:
+  Volume:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}a
+      Size: 100
+      VolumeType: gp2
+
+Outputs:
+  VolumeId:
+    Description: Volume ID of disk for 7days server
+    Value: !Ref Volume
+    Export:
+      Name: Seven-Days-Server-Disk

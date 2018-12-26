@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion:          '2010-09-09'
-Description:                       'EC2 Volume that serves 7 Days to Die'
+Description:                       'EBS Volume for 7 Days to Die'
 
 Resources:
   Volume:

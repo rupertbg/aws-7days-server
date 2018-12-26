@@ -4,58 +4,58 @@ Description:                       'EC2 Instance that serves 7 Days to Die'
 Parameters:
 
   VpcId:
-    Type:                          AWS::EC2::VPC::Id
-    Description:                   VPC to use
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to use
 
   InstanceType:
-    Description:                   EC2 instance type
-    Type:                          String
-    Default:                       c5.xlarge
-
-  AMI:
-    Type:                          AWS::EC2::Image::Id
-    Description:                   An Amazon Linux 2 AMI
-    Default:                       ami-0b84d2c53ad5250c2
+    Description: EC2 instance type
+    Type: String
+    Default: c5.xlarge
+  
+  AMIID:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Description: Latest Amazon Linux 2 AMI
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
 
   KeyPair:
-    Type:                          AWS::EC2::KeyPair::KeyName
-    Description:                   Name of SSH keypair
-    Default:                       seven-days-server
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of SSH keypair
+    Default: seven-days-server
 
   S3BucketName:
-    Type:                          AWS::SSM::Parameter::Value<String>
-    Description:                   S3 bucket name to put IP and port of server
-    Default:                       7days-server-ip-bucket
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: S3 bucket name to put IP and port of server
+    Default: 7days-server-ip-bucket
 
   PortNumber:
-    Type:                          Number
-    Description:                   Port number for server
-    Default:                       27900
+    Type: Number
+    Description: Port number for server
+    Default: 27900
 
   PortNumberTop:
-    Type:                          Number
-    Description:                   Top end port number for server
-    Default:                       27902
+    Type: Number
+    Description: Top end port number for server
+    Default: 27902
 
   SteamUsername:
-    Type:                          AWS::SSM::Parameter::Value<String>
-    Description:                   Username for Steam
-    Default:                       steam-username
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Username for Steam
+    Default: steam-username
 
   SteamPassword:
-    Type:                          AWS::SSM::Parameter::Value<String>
-    Description:                   Password for Steam
-    Default:                       steam-password
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Password for Steam
+    Default: steam-password
 
   ServerPassword:
-    Type:                          AWS::SSM::Parameter::Value<String>
-    Description:                   Password for server
-    Default:                       7days-password
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Password for server
+    Default: 7days-password
   
   WorldGenSeed:
-    Type:                          String
-    Description:                   Seed for random gen map
-    Default:                       guhishaduas78124
+    Type: String
+    Description: Seed for random gen map
+    Default: guhishaduas78124
 
 Resources:
 
@@ -71,7 +71,7 @@ Resources:
               - ec2.amazonaws.com
           Action:
             - sts:AssumeRole
-      Path:                        /
+      Path: /
       Policies:
         - PolicyName: !Sub ${AWS::StackName}-s3
           PolicyDocument:
@@ -107,7 +107,7 @@ Resources:
   DiskAttachment:
     Type: AWS::EC2::VolumeAttachment
     Properties:
-      Device: xvdc
+      Device: /dev/xvdc
       InstanceId: !Ref EC2Instance
       VolumeId: !ImportValue Seven-Days-Server-Disk
 
@@ -118,7 +118,7 @@ Resources:
       InstanceId: !Ref EC2Instance
 
   EC2Instance:
-    Type:                          AWS::EC2::Instance
+    Type: AWS::EC2::Instance
     Metadata:
       AWS::CloudFormation::Init:
         config:
@@ -291,11 +291,11 @@ Resources:
               owner: "root"
               group: "root"
     Properties:
-      ImageId:                     !Ref AMI
-      AvailabilityZone:            !Sub ${AWS::Region}a
-      InstanceType:                !Ref InstanceType
-      IamInstanceProfile:          !Ref EC2InstanceProfile
-      KeyName:                     !Ref KeyPair
+      ImageId: !Ref AMIID
+      AvailabilityZone: !Sub ${AWS::Region}a
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      KeyName: !Ref KeyPair
       SecurityGroupIds:
         - !Ref SecurityGroup
       Tags:
@@ -308,6 +308,7 @@ Resources:
           !Sub |
             #!/bin/bash
             set -euxo pipefail;
+            
             # Packages
             yum update -y;
             yum install -y expect telnet glibc.i686 libstdc++.i686 libstdc++48.i686 libgcc_s.so.1 mesa-libGLU libXcursor libXrandr;
@@ -328,13 +329,15 @@ Resources:
 
             # 7 Days to Die
             /opt/games/steamcmd/steamcmd.sh +login ${SteamUsername} ${SteamPassword} +force_install_dir /opt/games/7days +app_update 294420 +exit;
-            (crontab -l 2>/dev/null; echo "@reboot /opt/games/7days/startserver.sh -configfile=/opt/games/7days/customconfig.xml &") | crontab -;
-            /opt/games/7days/startserver.sh -configfile=/opt/games/7days/customconfig.xml &
+            echo "@reboot /opt/games/7days/startserver.sh -configfile=/opt/games/7days/customconfig.xml &" | crontab -;
 
             # Update IP address on s3 bucket
             IPADDRESS=$(curl http://169.254.169.254/latest/meta-data/public-ipv4);
             echo "$IPADDRESS:${PortNumber}" > 7dserver.txt;
             aws s3 cp 7dserver.txt s3://${S3BucketName};
+            
+            # Reboot
+            reboot;
 
 Outputs:
   InstanceIP:

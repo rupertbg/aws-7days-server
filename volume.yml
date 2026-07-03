@@ -4,10 +4,15 @@ Description:                       'EBS Volume for 7 Days to Die'
 Resources:
   Volume:
     Type: AWS::EC2::Volume
+    # This volume holds the game save and is intentionally decoupled from the
+    # instance so the instance can be redeployed without losing data. Retain it
+    # on stack update/replace/delete so a template change can never destroy saves.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       AvailabilityZone: !Sub ${AWS::Region}a
       Size: 100
-      VolumeType: gp2
+      VolumeType: gp3
 
 Outputs:
   VolumeId:

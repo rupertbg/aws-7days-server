@@ -2,25 +2,27 @@
 Run a dedicated 7 Days to Die server with start/stop access control, idle shutdown when no players connected and a static IP address.
 
 ## Architecture
-The architecture consists of three main components. An EBS Volume of 100GB, an Elastic IP Address and an EC2 Instance. The volume is deployed separately, so the instance can be re-deployed without deleting the volume, keeping any existing game data between instances.
+The architecture consists of three main components. A 100GB gp3 EBS Volume, an Elastic IP Address and an EC2 Instance. The volume is deployed separately, so the instance can be re-deployed without deleting the volume, keeping any existing game data between instances. The instance runs Ubuntu 24.04 LTS (The Fun Pimps' officially supported Linux target) and runs the server under systemd. The save volume is mounted at `/opt/games`, the server is installed at `/opt/games/7days`, and the game's user-data folder (worlds, saves, player profiles) is placed at `/opt/games/userdata` so all game state lives on the persistent volume.
 ![Deployment Architecture](7days.png)
 
 ## Configuration
-The main 7 Days to Die server configuration is controlled via the XML file injected during the cfn-init process. This is located in the metadata of the EC2 Instance resource in `instance.yml`
+The main 7 Days to Die server configuration is a `serverconfig.xml` written to `/opt/games/7days/serverconfig.xml` by the instance's UserData script (defined inline in `instance.yml`).
+
+As of 7 Days to Die V3.0, gameplay settings (difficulty, zombie speed, loot, blood moon, drop-on-death, day length, air drops, etc.) are no longer individual properties. They are all encoded in a single `SandboxCode` string, exposed here as the `SandboxCode` CloudFormation parameter. Generate your own from the in-game Sandbox Options menu; the default is the standard Adventurer preset.
 
 ## Deployment
 There are three main CloudFormation templates. The EIP and EBS Volume templates can be run in any order. The EC2 Instance template must be run after both of the other templates have been deployed.
   1. Deploy `ip.yml`
   2. Deploy `volume.yml`
   3. Ensure you have the following SSM Parameters:
-    - steam-username: Username for Steam account to use
-    - steam-password: Password for Steam account to use
     - 7days-password: Password for the server itself
-    - 7days-server-ip-bucket: An S3 bucket name to upload `7dserver.txt`, containing server IP and port in `0.0.0.0:8080` format.
+    - 7days-server-ip-bucket: An S3 bucket name to upload `7dserver.txt`, containing server IP and port in `0.0.0.0:26900` format.
   4. Deploy `instance.yml`
 
+The dedicated server (Steam app 294420) is downloaded with an anonymous Steam login, so no Steam credentials are required.
+
 ## Usage
-Check the Stack output of `instance.yml` or the S3 bucket (`s3://${S3BucketName}/7dserver.txt`) for the IP and port of the server you have deployed. Then connect to it using 7 Days to Die.
+Check the Stack output of `instance.yml` or the S3 bucket (`s3://${S3BucketName}/7dserver.txt`) for the IP and port of the server you have deployed. Then connect to it using 7 Days to Die. The default game port is UDP/TCP 26900.
 
 ### Start/Stop Access Control
 If you make an IAM User for people who want to be able to turn on the server on-demand then you can provide them `7days.bat` to enable them to easily turn on and off the right server, without them knowing the current instance ID.
@@ -55,5 +57,5 @@ If you would like to lock down the IAM User to only be able to control this 7 Da
 ```
 
 ### Idle Shutdown
-A cronjob is installed to run each hour using an automated telnet connection in `/opt/games/7days/listplayers.sh`. This lists the number of players currently connected to the server. If the number equals 0 then the server will shutdown.
+A systemd timer (`7dtd-idle.timer`) runs `/usr/local/bin/7dtd-idle-check` every 20 minutes. It uses an automated telnet connection (`/usr/local/bin/7dtd-listplayers`) to read how many players are currently connected. If it positively reads zero players the instance is shut down (stopped) to save cost. If the server or its telnet console is unreachable it does nothing, so the instance is never shut down before the server has started.
 

@@ -8,8 +8,13 @@ Resources:
       Domain: vpc
 
 Outputs:
-  VolumeId:
-    Description: EIP of 7days server
+  AllocationId:
+    Description: Allocation ID of the 7days server Elastic IP
     Value: !GetAtt EIP.AllocationId
     Export:
       Name: Seven-Days-Server-Address
+  PublicIp:
+    Description: Public IP address of the 7days server Elastic IP
+    Value: !Ref EIP
+    Export:
+      Name: Seven-Days-Server-Address-IP

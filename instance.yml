@@ -152,7 +152,20 @@ Resources:
               dpkg --add-architecture i386
               apt-get update -y
               apt-get install -y --no-install-recommends \
-                lib32gcc-s1 expect telnet curl wget tar unzip ca-certificates awscli
+                lib32gcc-s1 expect telnet curl wget tar unzip ca-certificates
+
+              # Ubuntu 24.04 dropped the 'awscli' apt package, so install AWS CLI
+              # v2 from Amazon's official installer (arch-aware) at /usr/local/bin/aws.
+              if ! command -v aws >/dev/null 2>&1; then
+                case "$(uname -m)" in
+                  aarch64) AWS_CLI_ARCH=aarch64 ;;
+                  *)       AWS_CLI_ARCH=x86_64 ;;
+                esac
+                curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${!AWS_CLI_ARCH}.zip" -o /tmp/awscliv2.zip
+                unzip -q /tmp/awscliv2.zip -d /tmp
+                /tmp/aws/install
+                rm -rf /tmp/aws /tmp/awscliv2.zip
+              fi
 
               # --- Service user ---------------------------------------------
               id sdtd &>/dev/null || useradd --system --create-home --home-dir /home/sdtd --shell /usr/sbin/nologin sdtd

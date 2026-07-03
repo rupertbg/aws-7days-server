@@ -8,9 +8,9 @@ Parameters:
     Description: VPC to use
 
   InstanceType:
-    Description: EC2 instance type (7 Days to Die V3.0 RWG worlds want ~16 GiB)
+    Description: EC2 instance type (memory-optimized for large V3.0 RWG worlds; r8i.xlarge = 4 vCPU / 32 GiB)
     Type: String
-    Default: m7i.xlarge
+    Default: r8i.xlarge
 
   AMIID:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>

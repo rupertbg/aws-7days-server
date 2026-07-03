@@ -1,5 +1,5 @@
 @echo off
-set region="ap-southeast-1"
+set region="ap-southeast-6"
 set action=%1
 set profile=%2
 

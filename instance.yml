@@ -70,15 +70,26 @@ Resources:
           Action:
             - sts:AssumeRole
       Path: /
+      # AmazonSSMManagedInstanceCore lets the pre-installed SSM agent register
+      # the instance so we can open Session Manager shells (no SSH/inbound rule).
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
-        - PolicyName: !Sub ${AWS::StackName}-s3
+        - PolicyName: !Sub ${AWS::StackName}-bootstrap
           PolicyDocument:
             Statement:
+              # Publish the static server address for clients to discover.
               - Effect: Allow
                 Action:
                   - s3:PutObject
                 Resource:
                   - !Sub arn:${AWS::Partition}:s3:::${S3BucketName}/7dserver.txt
+              # Read the volume id and Elastic IP from the sibling stacks'
+              # exports at boot. ListExports has no resource-level scoping.
+              - Effect: Allow
+                Action:
+                  - cloudformation:ListExports
+                Resource: '*'
 
   EC2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -140,8 +151,7 @@ Resources:
           Value: 7DaysServer
       UserData:
         Fn::Base64:
-          Fn::Sub:
-            - |
+          Fn::Sub: |
               #!/bin/bash
               set -euxo pipefail
               export DEBIAN_FRONTEND=noninteractive
@@ -161,10 +171,28 @@ Resources:
                   aarch64) AWS_CLI_ARCH=aarch64 ;;
                   *)       AWS_CLI_ARCH=x86_64 ;;
                 esac
-                curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${!AWS_CLI_ARCH}.zip" -o /tmp/awscliv2.zip
+                curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$AWS_CLI_ARCH.zip" -o /tmp/awscliv2.zip
                 unzip -q /tmp/awscliv2.zip -d /tmp
                 /tmp/aws/install
                 rm -rf /tmp/aws /tmp/awscliv2.zip
+              fi
+
+              # --- Cross-stack values (read at boot, not baked into the template)
+              # The save volume and Elastic IP are created by sibling stacks and
+              # published as CloudFormation exports; read them via the CLI instead
+              # of wiring them in as Fn::Sub imports.
+              export AWS_DEFAULT_REGION=${AWS::Region}
+              get_export() {
+                aws cloudformation list-exports \
+                  --query "Exports[?Name=='$1'].Value" --output text
+              }
+              VOL_ID=$(get_export Seven-Days-Server-Disk)
+              PUBLIC_IP=$(get_export Seven-Days-Server-Address-IP)
+              if [ -z "$VOL_ID" ] || [ "$VOL_ID" = None ]; then
+                echo "ERROR: export Seven-Days-Server-Disk not found" >&2; exit 1
+              fi
+              if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" = None ]; then
+                echo "ERROR: export Seven-Days-Server-Address-IP not found" >&2; exit 1
               fi
 
               # --- Service user ---------------------------------------------
@@ -175,16 +203,16 @@ Resources:
               # non-deterministic name; the stable path is the by-id symlink keyed on
               # the volume id (dashes stripped). Wait for it, then ONLY format when
               # the volume has no filesystem - never reformat an existing save.
-              VOL_NODASH=$(echo "${VolId}" | tr -d -)
-              BYID="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${!VOL_NODASH}"
-              for i in $(seq 1 30); do [ -e "${!BYID}" ] && break; sleep 5; done
-              DEV=$(readlink -f "${!BYID}")
+              VOL_NODASH=$(echo "$VOL_ID" | tr -d -)
+              BYID="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$VOL_NODASH"
+              for i in $(seq 1 30); do [ -e "$BYID" ] && break; sleep 5; done
+              DEV=$(readlink -f "$BYID")
               mkdir -p /opt/games
-              if ! blkid "${!DEV}"; then
-                mkfs.ext4 -L 7dtd "${!DEV}"
+              if ! blkid "$DEV"; then
+                mkfs.ext4 -L 7dtd "$DEV"
               fi
-              UUID=$(blkid -s UUID -o value "${!DEV}")
-              grep -q "${!UUID}" /etc/fstab || echo "UUID=${!UUID} /opt/games ext4 defaults,noatime,nofail 0 2" >> /etc/fstab
+              UUID=$(blkid -s UUID -o value "$DEV")
+              grep -q "$UUID" /etc/fstab || echo "UUID=$UUID /opt/games ext4 defaults,noatime,nofail 0 2" >> /etc/fstab
               mount -a
 
               # --- SteamCMD + 7 Days to Die (dedicated server app 294420) ---
@@ -344,11 +372,9 @@ Resources:
               systemctl enable --now 7dtd-idle.timer
 
               # --- Publish the static server address to S3 ------------------
-              # Uses the imported Elastic IP directly - no IMDS race, no guessing.
-              echo "${PublicIp}:${PortNumber}" > /tmp/7dserver.txt
+              # Uses the Elastic IP read from the export - no IMDS race, no guessing.
+              echo "$PUBLIC_IP:${PortNumber}" > /tmp/7dserver.txt
               aws s3 cp /tmp/7dserver.txt s3://${S3BucketName}/7dserver.txt
-            - VolId: !ImportValue Seven-Days-Server-Disk
-              PublicIp: !ImportValue Seven-Days-Server-Address-IP
 
 Outputs:
   InstanceIP:

@@ -20,7 +20,6 @@ Parameters:
   KeyPair:
     Type: AWS::EC2::KeyPair::KeyName
     Description: Name of SSH keypair
-    Default: seven-days-server
 
   S3BucketName:
     Type: AWS::SSM::Parameter::Value<String>

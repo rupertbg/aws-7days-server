@@ -282,29 +282,38 @@ Resources:
               mount -a
 
               # --- SteamCMD + 7 Days to Die (dedicated server app 294420) ---
-              # Install onto the persistent volume, log in anonymously (no creds).
-              # On a fresh extract SteamCMD self-updates on first run; that first
-              # invocation can fail with "Failed to install app ... (Missing
-              # configuration)" before the client is bootstrapped, so retry until
-              # the app_update succeeds (up to 5 attempts) rather than letting
-              # set -e abort the whole bootstrap on a transient first-run failure.
+              # SteamCMD and the game live on the persistent save volume, so a
+              # fresh ASG instance reuses the existing copy instead of
+              # reinstalling: only extract SteamCMD when it is missing, and skip
+              # the full `validate` re-hash once the app manifest exists (a first
+              # install validates; later boots just run app_update to pick up
+              # patches, and SteamCMD resumes an interrupted update from its own
+              # manifest). On a fresh extract SteamCMD self-updates on first run;
+              # that first invocation can fail with "Failed to install app ...
+              # (Missing configuration)" before the client is bootstrapped, so
+              # retry (up to 5 attempts) rather than letting set -e abort the
+              # whole bootstrap on a transient first-run failure.
               mkdir -p /opt/games/steamcmd /opt/games/7days /opt/games/userdata
-              chown -R sdtd:sdtd /opt/games
-              sudo -u sdtd bash -c '
-                set -eux
-                cd /opt/games/steamcmd
+              chown sdtd:sdtd /opt/games /opt/games/steamcmd /opt/games/7days /opt/games/userdata
+              if [ -f /opt/games/7days/steamapps/appmanifest_294420.acf ]; then VALIDATE=""; else VALIDATE="validate"; fi
+              sudo -u sdtd bash -s -- "$VALIDATE" <<'STEAMCMD'
+              set -eux
+              VALIDATE="$1"
+              cd /opt/games/steamcmd
+              if [ ! -x ./steamcmd.sh ]; then
                 curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" | tar zxvf -
-                n=0
-                until ./steamcmd.sh +force_install_dir /opt/games/7days +login anonymous +app_update 294420 validate +quit; do
-                  n=$((n+1))
-                  if [ "$n" -ge 5 ]; then
-                    echo "ERROR: steamcmd app_update 294420 failed after $n attempts" >&2
-                    exit 1
-                  fi
-                  echo "steamcmd app_update failed (attempt $n), retrying in 15s..." >&2
-                  sleep 15
-                done
-              '
+              fi
+              n=0
+              until ./steamcmd.sh +force_install_dir /opt/games/7days +login anonymous +app_update 294420 $VALIDATE +quit; do
+                n=$((n+1))
+                if [ "$n" -ge 5 ]; then
+                  echo "ERROR: steamcmd app_update 294420 failed after $n attempts" >&2
+                  exit 1
+                fi
+                echo "steamcmd app_update failed (attempt $n), retrying in 15s..." >&2
+                sleep 15
+              done
+              STEAMCMD
 
               # --- Server config (V3.0 serverconfig.xml) --------------------
               # Rewritten on every launch: under the ASG the template is the
@@ -378,6 +387,7 @@ Resources:
                 <property name="HideCommandExecutionLog" value="0"/>
               </ServerSettings>
               SEVENDAYSCFG
+              chown sdtd:sdtd /opt/games/7days/serverconfig.xml
 
               # --- Telnet console reader ------------------------------------
               # Connects to the telnet console and runs listplayers; used by both
@@ -514,7 +524,6 @@ Resources:
               WantedBy=timers.target
               HEALTHTIMER
 
-              chown -R sdtd:sdtd /opt/games
               systemctl daemon-reload
               systemctl enable --now 7dtd.service
               systemctl enable --now 7dtd-idle.timer

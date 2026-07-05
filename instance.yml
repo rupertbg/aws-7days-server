@@ -216,12 +216,27 @@ Resources:
 
               # --- SteamCMD + 7 Days to Die (dedicated server app 294420) ---
               # Install onto the persistent volume, log in anonymously (no creds).
+              # On a fresh extract SteamCMD self-updates on first run; that first
+              # invocation can fail with "Failed to install app ... (Missing
+              # configuration)" before the client is bootstrapped, so retry until
+              # the app_update succeeds (up to 5 attempts) rather than letting
+              # set -e abort the whole bootstrap on a transient first-run failure.
               mkdir -p /opt/games/steamcmd /opt/games/7days /opt/games/userdata
               chown -R sdtd:sdtd /opt/games
               sudo -u sdtd bash -c '
+                set -eux
                 cd /opt/games/steamcmd
                 curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" | tar zxvf -
-                ./steamcmd.sh +force_install_dir /opt/games/7days +login anonymous +app_update 294420 validate +quit
+                n=0
+                until ./steamcmd.sh +force_install_dir /opt/games/7days +login anonymous +app_update 294420 validate +quit; do
+                  n=$((n+1))
+                  if [ "$n" -ge 5 ]; then
+                    echo "ERROR: steamcmd app_update 294420 failed after $n attempts" >&2
+                    exit 1
+                  fi
+                  echo "steamcmd app_update failed (attempt $n), retrying in 15s..." >&2
+                  sleep 15
+                done
               '
 
               # --- Server config (V3.0 serverconfig.xml) --------------------

@@ -1,11 +1,20 @@
 AWSTemplateFormatVersion:          '2010-09-09'
-Description:                       'EC2 Instance that serves 7 Days to Die'
+Description:                       'Auto Scaling Group (0/1) that serves 7 Days to Die'
 
 Parameters:
 
   VpcId:
     Type: AWS::EC2::VPC::Id
     Description: VPC to use
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >-
+      Subnet the Auto Scaling Group launches into. MUST be in the same
+      Availability Zone as the save volume and Elastic IP (the volume is
+      created in the region's first AZ, the -a suffix, so pick a subnet in
+      that AZ). A single EBS volume attaches to one instance in one AZ, so
+      the ASG is pinned here.
 
   InstanceType:
     Description: EC2 instance type (memory-optimized for large V3.0 RWG worlds; r8i.xlarge = 4 vCPU / 32 GiB)
@@ -89,6 +98,39 @@ Resources:
                 Action:
                   - cloudformation:ListExports
                 Resource: '*'
+              # Under an ASG the instance attaches its own storage. Scope
+              # AttachVolume to the specific save volume and any instance
+              # (the ASG-launched instance id is not known ahead of time).
+              - Effect: Allow
+                Action:
+                  - ec2:AttachVolume
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+                  - !Sub
+                    - arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/${Vol}
+                    - Vol: !ImportValue Seven-Days-Server-Disk
+              # Self-associate the Elastic IP on boot. AssociateAddress does not
+              # support reliable resource-level scoping across the instance + EIP
+              # + primary ENI it touches, so allow it broadly on this dedicated
+              # single-purpose role.
+              - Effect: Allow
+                Action:
+                  - ec2:AssociateAddress
+                Resource: '*'
+              # Describe calls used by the attach wait loop; no resource scoping.
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeAddresses
+                Resource: '*'
+              # Idle-stop (terminate + decrement) and self-heal (set unhealthy),
+              # scoped to this stack's Auto Scaling Group.
+              - Effect: Allow
+                Action:
+                  - autoscaling:SetInstanceHealth
+                  - autoscaling:TerminateInstanceInAutoScalingGroup
+                Resource:
+                  - !Sub arn:${AWS::Partition}:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${AWS::StackName}-asg
 
   EC2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -117,47 +159,39 @@ Resources:
           ToPort: !Ref PortNumber
           IpProtocol: tcp
 
-  DiskAttachment:
-    Type: AWS::EC2::VolumeAttachment
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
     Properties:
-      Device: /dev/xvdc
-      InstanceId: !Ref EC2Instance
-      VolumeId: !ImportValue Seven-Days-Server-Disk
-
-  EIPAssociation:
-    Type: AWS::EC2::EIPAssociation
-    Properties:
-      AllocationId: !ImportValue Seven-Days-Server-Address
-      InstanceId: !Ref EC2Instance
-
-  EC2Instance:
-    Type: AWS::EC2::Instance
-    Properties:
-      ImageId: !Ref AMIID
-      AvailabilityZone: !Sub ${AWS::Region}a
-      InstanceType: !Ref InstanceType
-      IamInstanceProfile: !Ref EC2InstanceProfile
-      KeyName: !Ref KeyPair
-      SecurityGroupIds:
-        - !Ref SecurityGroup
-      MetadataOptions:
-        HttpEndpoint: enabled
-        HttpTokens: required
-      Tags:
-        - Key: AccessControl
-          Value: 7Days
-        - Key: Name
-          Value: 7DaysServer
-      UserData:
-        Fn::Base64:
-          Fn::Sub: |
+      LaunchTemplateName: !Sub ${AWS::StackName}-lt
+      LaunchTemplateData:
+        ImageId: !Ref AMIID
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyPair
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref SecurityGroup
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: 7DaysServer
+              - Key: AccessControl
+                Value: 7Days
+        UserData:
+          Fn::Base64:
+            Fn::Sub: |
               #!/bin/bash
               set -euxo pipefail
               export DEBIAN_FRONTEND=noninteractive
+              export AWS_DEFAULT_REGION=${AWS::Region}
 
               # --- Packages -------------------------------------------------
               # steamcmd is a 32-bit binary, hence the i386 arch + lib32gcc.
-              # expect/telnet drive the idle-player check over the telnet console.
+              # expect/telnet drive the console checks over the telnet console.
               dpkg --add-architecture i386
               apt-get update -y
               apt-get install -y --no-install-recommends \
@@ -176,28 +210,61 @@ Resources:
                 rm -rf /tmp/aws /tmp/awscliv2.zip
               fi
 
+              # --- Instance identity (IMDSv2) -------------------------------
+              TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+              IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+
               # --- Cross-stack values (read at boot, not baked into the template)
               # The save volume and Elastic IP are created by sibling stacks and
               # published as CloudFormation exports; read them via the CLI instead
               # of wiring them in as Fn::Sub imports.
-              export AWS_DEFAULT_REGION=${AWS::Region}
               get_export() {
                 aws cloudformation list-exports \
                   --query "Exports[?Name=='$1'].Value" --output text
               }
               VOL_ID=$(get_export Seven-Days-Server-Disk)
+              ALLOC_ID=$(get_export Seven-Days-Server-Address)
               PUBLIC_IP=$(get_export Seven-Days-Server-Address-IP)
               if [ -z "$VOL_ID" ] || [ "$VOL_ID" = None ]; then
                 echo "ERROR: export Seven-Days-Server-Disk not found" >&2; exit 1
+              fi
+              if [ -z "$ALLOC_ID" ] || [ "$ALLOC_ID" = None ]; then
+                echo "ERROR: export Seven-Days-Server-Address not found" >&2; exit 1
               fi
               if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" = None ]; then
                 echo "ERROR: export Seven-Days-Server-Address-IP not found" >&2; exit 1
               fi
 
+              # --- Claim the Elastic IP -------------------------------------
+              # The ASG does not associate EIPs; do it ourselves. --allow-reassociation
+              # moves the address off any previous instance still releasing it.
+              for i in $(seq 1 12); do
+                if aws ec2 associate-address --allocation-id "$ALLOC_ID" --instance-id "$IID" --allow-reassociation >/dev/null 2>&1; then
+                  break
+                fi
+                echo "waiting to associate EIP $ALLOC_ID (attempt $i)..." >&2
+                sleep 5
+              done
+
               # --- Service user ---------------------------------------------
               id sdtd &>/dev/null || useradd --system --create-home --home-dir /home/sdtd --shell /usr/sbin/nologin sdtd
 
-              # --- Persistent save volume -----------------------------------
+              # --- Attach + mount the persistent save volume ----------------
+              # The ASG does not attach volumes; attach it to THIS instance and
+              # wait until the attachment sticks (survives a brief detach race if
+              # a previous instance is still releasing the volume).
+              for i in $(seq 1 60); do
+                if aws ec2 attach-volume --volume-id "$VOL_ID" --instance-id "$IID" --device /dev/sdf >/dev/null 2>&1; then
+                  break
+                fi
+                cur=$(aws ec2 describe-volumes --volume-ids "$VOL_ID" --query 'Volumes[0].Attachments[0].InstanceId' --output text 2>/dev/null || true)
+                if [ "$cur" = "$IID" ]; then
+                  break
+                fi
+                echo "waiting to attach $VOL_ID (attempt $i)..." >&2
+                sleep 5
+              done
+
               # On Nitro instances the EBS volume shows up as an NVMe device with a
               # non-deterministic name; the stable path is the by-id symlink keyed on
               # the volume id (dashes stripped). Wait for it, then ONLY format when
@@ -240,6 +307,8 @@ Resources:
               '
 
               # --- Server config (V3.0 serverconfig.xml) --------------------
+              # Rewritten on every launch: under the ASG the template is the
+              # source of truth, so config never drifts from what is deployed.
               cat > /opt/games/7days/serverconfig.xml <<'SEVENDAYSCFG'
               <?xml version="1.0"?>
               <ServerSettings>
@@ -310,11 +379,9 @@ Resources:
               </ServerSettings>
               SEVENDAYSCFG
 
-              # --- Idle-player check (drives an instance stop when empty) ---
-              # Connects to the telnet console, runs listplayers, and shuts the
-              # instance down ONLY when it positively reads zero players. If the
-              # server/telnet is unreachable, number stays empty and we do NOT
-              # shut down (fail safe).
+              # --- Telnet console reader ------------------------------------
+              # Connects to the telnet console and runs listplayers; used by both
+              # the idle check and the self-heal check below.
               cat > /usr/local/bin/7dtd-listplayers <<'LISTPLAYERS'
               #!/usr/bin/expect
               set timeout 20
@@ -328,15 +395,61 @@ Resources:
               LISTPLAYERS
               chmod 0755 /usr/local/bin/7dtd-listplayers
 
+              # --- Idle check (scale the ASG to zero) -----------------------
+              # Connects to the telnet console, runs listplayers, and terminates
+              # THIS instance while decrementing desired capacity to 0 ONLY when
+              # it positively reads zero players. A plain OS shutdown would just
+              # be relaunched while desired capacity is 1. If the server/telnet is
+              # unreachable the number stays empty and we do NOT scale down.
               cat > /usr/local/bin/7dtd-idle-check <<'IDLECHECK'
               #!/bin/bash
+              export AWS_DEFAULT_REGION=${AWS::Region}
               output=$(/usr/local/bin/7dtd-listplayers 2>/dev/null || true)
               number=$(echo "$output" | grep "in the game" | grep -Eo "[0-9]+" | head -1)
               if [ -n "$number" ] && [ "$number" -eq 0 ]; then
-                /sbin/shutdown -h now
+                TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+                IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+                aws autoscaling terminate-instance-in-auto-scaling-group \
+                  --instance-id "$IID" --should-decrement-desired-capacity
               fi
               IDLECHECK
               chmod 0755 /usr/local/bin/7dtd-idle-check
+
+              # --- Self-heal check (replace a wedged game process) ----------
+              # If the console was reachable before but has since stopped
+              # responding for THRESHOLD consecutive checks, mark THIS instance
+              # Unhealthy so the ASG replaces it. Fail-safe: do nothing until the
+              # server has been healthy at least once this boot (state lives on
+              # tmpfs /run so it resets each launch), which prevents killing a
+              # slow first boot / world-gen. Dead hosts are handled underneath by
+              # the ASG's EC2 status-check health type.
+              cat > /usr/local/bin/7dtd-health-check <<'HEALTHCHECK'
+              #!/bin/bash
+              export AWS_DEFAULT_REGION=${AWS::Region}
+              STATE=/run/7dtd-health
+              READY_MARK="$STATE/was_healthy"
+              FAILS_FILE="$STATE/fails"
+              THRESHOLD=3
+              mkdir -p "$STATE"
+              output=$(/usr/local/bin/7dtd-listplayers 2>/dev/null || true)
+              if echo "$output" | grep -q "in the game"; then
+                echo 0 > "$FAILS_FILE"
+                touch "$READY_MARK"
+                exit 0
+              fi
+              # Unreachable: ignore entirely until the server has been healthy once.
+              [ -f "$READY_MARK" ] || exit 0
+              fails=$(cat "$FAILS_FILE" 2>/dev/null || echo 0)
+              fails=$((fails+1))
+              echo "$fails" > "$FAILS_FILE"
+              if [ "$fails" -ge "$THRESHOLD" ]; then
+                TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+                IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+                echo "7dtd console unreachable for $fails checks; marking $IID Unhealthy" >&2
+                aws autoscaling set-instance-health --instance-id "$IID" --health-status Unhealthy
+              fi
+              HEALTHCHECK
+              chmod 0755 /usr/local/bin/7dtd-health-check
 
               # --- systemd units --------------------------------------------
               cat > /etc/systemd/system/7dtd.service <<'SERVERUNIT'
@@ -361,7 +474,7 @@ Resources:
 
               cat > /etc/systemd/system/7dtd-idle.service <<'IDLEUNIT'
               [Unit]
-              Description=Shut down the instance when the 7DTD server is empty
+              Description=Scale the ASG to zero when the 7DTD server is empty
 
               [Service]
               Type=oneshot
@@ -380,19 +493,71 @@ Resources:
               WantedBy=timers.target
               IDLETIMER
 
+              cat > /etc/systemd/system/7dtd-health.service <<'HEALTHUNIT'
+              [Unit]
+              Description=Self-heal check for a wedged 7DTD server process
+
+              [Service]
+              Type=oneshot
+              ExecStart=/usr/local/bin/7dtd-health-check
+              HEALTHUNIT
+
+              cat > /etc/systemd/system/7dtd-health.timer <<'HEALTHTIMER'
+              [Unit]
+              Description=Periodic self-heal check for the 7DTD server
+
+              [Timer]
+              OnBootSec=5min
+              OnUnitActiveSec=5min
+
+              [Install]
+              WantedBy=timers.target
+              HEALTHTIMER
+
               chown -R sdtd:sdtd /opt/games
               systemctl daemon-reload
               systemctl enable --now 7dtd.service
               systemctl enable --now 7dtd-idle.timer
+              systemctl enable --now 7dtd-health.timer
 
               # --- Publish the static server address to S3 ------------------
               # Uses the Elastic IP read from the export - no IMDS race, no guessing.
               echo "$PUBLIC_IP:${PortNumber}" > /tmp/7dserver.txt
               aws s3 cp /tmp/7dserver.txt s3://${S3BucketName}/7dserver.txt
 
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${AWS::StackName}-asg
+      # Scale to zero (empty) and up to one on demand. Max is 1 by design: a
+      # 7DTD dedicated server is a single authoritative process owning one world
+      # save on one EBS volume, so there is nothing to scale horizontally.
+      MinSize: '0'
+      MaxSize: '1'
+      # DesiredCapacity is intentionally omitted: on create it defaults to
+      # MinSize (0), and CloudFormation then leaves runtime desired capacity
+      # alone so a stack update never stomps a running server or a scale-up.
+      VPCZoneIdentifier:
+        - !Ref SubnetId
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      # EC2 status checks replace a dead host automatically. The game-process
+      # self-heal check (on-instance) covers a wedged-but-alive server. Grace is
+      # generous so SteamCMD install + first world-gen is not killed mid-boot.
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 600
+      Tags:
+        - Key: Name
+          Value: 7DaysServer
+          PropagateAtLaunch: true
+        - Key: AccessControl
+          Value: 7Days
+          PropagateAtLaunch: true
+
 Outputs:
-  InstanceIP:
-    Description: Instance ID of 7days server
-    Value: !Ref EC2Instance
+  AutoScalingGroupName:
+    Description: Name of the 7days server Auto Scaling Group
+    Value: !Ref AutoScalingGroup
     Export:
-      Name: Seven-Days-Server-Instance
+      Name: Seven-Days-Server-ASG

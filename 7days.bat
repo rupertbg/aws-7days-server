@@ -1,26 +1,29 @@
 @echo off
+setlocal
 set region="ap-southeast-6"
 set action=%1
 set profile=%2
 
 if "%profile%" == "" set profile="default"
 
-if "%action%" == "start" goto Run
-if "%action%" == "stop" goto Run
+if "%action%" == "start" set desired=1
+if "%action%" == "stop" set desired=0
+if not defined desired goto Help
+goto Run
 
 :Help
   echo | set /p="You must pass in the action (either start or stop). You can optionally provide an AWS CLI profile name to use"
-  echo | set /p="Usage: 7days.bat start|stop [awsprofile]"
+  echo | set /p="Usage: 7days.bat start^|stop [awsprofile]"
   goto:EOF
 
 :Run
-  if "%action%" == "start" set state="stopped"
-  if "%action%" == "stop" set state="running"
-  FOR /F "tokens=* USEBACKQ" %%F IN (`aws --profile %profile% --region %region% ec2 describe-instances --filters "Name=tag:Name,Values=7DaysServer" "Name=instance-state-name,Values=%state%" --query Reservations[0].Instances[0].InstanceId --output text`) DO (set instance=%%F)
-  if not "%instance:~0,2%" == "i-" goto NoInstance
-  aws --profile %profile% --region %region% ec2 %action%-instances --instance-ids %instance% --output text
+  FOR /F "tokens=* USEBACKQ" %%F IN (`aws --profile %profile% --region %region% autoscaling describe-auto-scaling-groups --filters "Name=tag:AccessControl,Values=7Days" --query AutoScalingGroups[0].AutoScalingGroupName --output text`) DO (set asg=%%F)
+  if "%asg%" == "" goto NoAsg
+  if "%asg%" == "None" goto NoAsg
+  aws --profile %profile% --region %region% autoscaling set-desired-capacity --auto-scaling-group-name %asg% --desired-capacity %desired% --output text
+  echo | set /p="Set %asg% desired capacity to %desired%"
   goto:EOF
 
-:NoInstance
-  echo | set /p="No instance found to %action%"
+:NoAsg
+  echo | set /p="No 7Days Auto Scaling Group found"
   goto:EOF

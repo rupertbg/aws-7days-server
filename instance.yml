@@ -405,6 +405,24 @@ Resources:
               LISTPLAYERS
               chmod 0755 /usr/local/bin/7dtd-listplayers
 
+              # --- Generic telnet console command runner --------------------
+              # Sends a single arbitrary command to the game console; used by the
+              # spot-interruption drain to issue saveworld / say.
+              cat > /usr/local/bin/7dtd-console <<'CONSOLE'
+              #!/usr/bin/expect
+              set timeout 20
+              set cmd [lindex $argv 0]
+              spawn telnet localhost 8081
+              expect -re "Please enter password:"
+              send "${ServerPassword}\r"
+              expect -re "end session."
+              send "$cmd\r"
+              sleep 2
+              send "exit\r"
+              expect eof
+              CONSOLE
+              chmod 0755 /usr/local/bin/7dtd-console
+
               # --- Idle check (scale the ASG to zero) -----------------------
               # Connects to the telnet console, runs listplayers, and terminates
               # THIS instance while decrementing desired capacity to 0 ONLY when
@@ -460,6 +478,29 @@ Resources:
               fi
               HEALTHCHECK
               chmod 0755 /usr/local/bin/7dtd-health-check
+
+              # --- Spot interruption drain ----------------------------------
+              # Poll IMDS for the ~2-minute spot interruption notice; on the
+              # warning, save the world and warn players so a reclaim costs at
+              # most a reconnect (the ASG relaunches and the replacement
+              # reattaches the same save volume). On on-demand instances the
+              # metadata stays 404 and this loop simply idles.
+              cat > /usr/local/bin/7dtd-spot-drain <<'SPOTDRAIN'
+              #!/bin/bash
+              while true; do
+                T=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+                action=$(curl -s -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/meta-data/spot/instance-action)
+                if echo "$action" | grep -q '"action"'; then
+                  echo "spot interruption notice received; saving world" >&2
+                  /usr/local/bin/7dtd-console "say \"Server reclaim imminent - saving and restarting shortly\"" || true
+                  /usr/local/bin/7dtd-console "saveworld" || true
+                  sleep 10
+                  exit 0
+                fi
+                sleep 5
+              done
+              SPOTDRAIN
+              chmod 0755 /usr/local/bin/7dtd-spot-drain
 
               # --- systemd units --------------------------------------------
               cat > /etc/systemd/system/7dtd.service <<'SERVERUNIT'
@@ -524,10 +565,26 @@ Resources:
               WantedBy=timers.target
               HEALTHTIMER
 
+              cat > /etc/systemd/system/7dtd-spot-drain.service <<'SPOTUNIT'
+              [Unit]
+              Description=Save the 7DTD world on a spot interruption notice
+              After=7dtd.service
+
+              [Service]
+              Type=simple
+              ExecStart=/usr/local/bin/7dtd-spot-drain
+              Restart=on-failure
+              RestartSec=10
+
+              [Install]
+              WantedBy=multi-user.target
+              SPOTUNIT
+
               systemctl daemon-reload
               systemctl enable --now 7dtd.service
               systemctl enable --now 7dtd-idle.timer
               systemctl enable --now 7dtd-health.timer
+              systemctl enable --now 7dtd-spot-drain.service
 
               # --- Publish the static server address to S3 ------------------
               # Uses the Elastic IP read from the export - no IMDS race, no guessing.
@@ -548,9 +605,29 @@ Resources:
       # alone so a stack update never stomps a running server or a scale-up.
       VPCZoneIdentifier:
         - !Ref SubnetId
-      LaunchTemplate:
-        LaunchTemplateId: !Ref LaunchTemplate
-        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      # Run on spot for cheap compute; the world save lives on a reattachable
+      # EBS volume, so a reclaim costs a reconnect, not the world. The AZ is
+      # pinned to the volume, so instance-type diversity is the only spot lever
+      # - the Overrides list widens the spot pools. Unavailable types in a given
+      # region/AZ are simply skipped, so tune this list to what your region
+      # offers (all are ~32 GiB x86; 7DTD has no ARM build). NOTE: at MaxSize 1
+      # there is no native spot->on-demand fallback if every pool is dry (see
+      # the fallback-automation follow-up).
+      MixedInstancesPolicy:
+        InstancesDistribution:
+          OnDemandBaseCapacity: 0
+          OnDemandPercentageAboveBaseCapacity: 0
+          OnDemandAllocationStrategy: prioritized
+          SpotAllocationStrategy: price-capacity-optimized
+        LaunchTemplate:
+          LaunchTemplateSpecification:
+            LaunchTemplateId: !Ref LaunchTemplate
+            Version: !GetAtt LaunchTemplate.LatestVersionNumber
+          Overrides:
+            - InstanceType: !Ref InstanceType
+            - InstanceType: r7i.xlarge
+            - InstanceType: m8i.2xlarge
+            - InstanceType: r8i.2xlarge
       # EC2 status checks replace a dead host automatically. The game-process
       # self-heal check (on-instance) covers a wedged-but-alive server. Grace is
       # generous so SteamCMD install + first world-gen is not killed mid-boot.

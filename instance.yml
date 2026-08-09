@@ -42,18 +42,46 @@ Parameters:
 
   PortNumberTop:
     Type: Number
-    Description: Top end game port (ServerPort + 2)
-    Default: 26902
+    Description: Top end game port (ServerPort + 3; 26903 covers the EOS/crossplay port)
+    Default: 26903
 
-  ServerPassword:
+  GamePassword:
     Type: AWS::SSM::Parameter::Value<String>
-    Description: Password for server
-    Default: 7days-password
+    Description: >-
+      Name of the SSM parameter holding the password players type to join the
+      server (serverconfig ServerPassword). Kept in SSM, like the admin
+      password, so it is not baked into the template. SSM parameters cannot
+      hold an empty string, so the literal value 'none' means "no join
+      password" - i.e. an open server that anyone who has the address can join.
+    Default: 7days-game-password
+
+  AdminPassword:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: >-
+      Name of the SSM parameter holding the server console password
+      (serverconfig TelnetPassword). This is the operator credential: the idle
+      check, self-heal check, spot drain and login watcher all authenticate to
+      the telnet console with it. Not the same as the player join password.
+    Default: 7days-admin-password
+
+  NotifyEmail:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: >-
+      Email address that receives a notification when the server becomes
+      joinable, when its host shuts down, and every time a player joins. Read
+      from SSM (like the password) so the address is not baked into the
+      template. SNS sends a one-time confirmation link that must be clicked
+      before any notification is delivered.
+    Default: 7days-notify-email
 
   WorldGenSeed:
     Type: String
-    Description: Seed for random gen map
-    Default: guhishaduas78124
+    Description: >-
+      Seed for the random-gen map. Any string; the same seed and size always
+      generate the same world. Only used when GameWorld is RWG. Changing it
+      after a world exists does NOT regenerate it - the save on the volume
+      keeps being used.
+    Default: SevenDaysOnAws
 
   SandboxCode:
     Type: String
@@ -63,7 +91,257 @@ Parameters:
       in-game Sandbox Options menu. Default is the standard Adventurer preset.
     Default: AAAJABJACJADJARFBNC
 
+  AutoShutdown:
+    Type: String
+    Description: >-
+      Whether the server auto-scales the ASG to zero after being empty for the
+      idle grace window (IdleGraceMinutes). Set to disabled to keep it running until
+      it is stopped manually (7days.bat stop, i.e. desired capacity 0). Toggling
+      this on a running server takes effect within the cfn-hup poll interval.
+    AllowedValues:
+      - enabled
+      - disabled
+    Default: enabled
+
+  # --- Server identity (what players see in the server browser) --------------
+  # These land in serverconfig.xml as attribute values, so any text here must be
+  # XML-safe: write & as &amp; and < as &lt;, and do not use a double quote.
+
+  ServerName:
+    Type: String
+    Description: Name shown in the server browser.
+    Default: 7 Days to Die on AWS
+    MinLength: 1
+
+  ServerDescription:
+    Type: String
+    Description: Description shown in the server browser.
+    Default: A 7 Days to Die dedicated server running on AWS.
+
+  ServerWebsiteURL:
+    Type: String
+    Description: Website link shown in the server browser. Leave empty for none.
+    Default: ''
+
+  ServerVisibility:
+    Type: Number
+    Description: >-
+      0 = not listed (join by IP only), 1 = friends only, 2 = public listing in
+      the server browser.
+    AllowedValues:
+      - 0
+      - 1
+      - 2
+    Default: 2
+
+  ServerMaxPlayerCount:
+    Type: Number
+    Description: Maximum concurrent players.
+    Default: 16
+    MinValue: 1
+
+  ServerReservedSlots:
+    Type: Number
+    Description: >-
+      Slots held back for players whose permission level is at or above
+      ServerReservedSlotsPermission (see AdminPermissionLevel; a LOWER number
+      means more power).
+    Default: 2
+    MinValue: 0
+
+  ServerReservedSlotsPermission:
+    Type: Number
+    Description: Permission level required to claim a reserved slot.
+    Default: 100
+    MinValue: 0
+    MaxValue: 1000
+
+  # --- Admins ----------------------------------------------------------------
+
+  AdminSteamIds:
+    Type: String
+    Description: >-
+      Comma-separated SteamID64s granted admin on the server - the 17-digit id
+      at the end of a steamcommunity.com/profiles/ URL, e.g.
+      "76561197960265728,76561197960265729". Empty (the default) means no
+      admins are configured. Rewritten on every launch from this parameter, so
+      in-game admin edits do not survive a relaunch.
+    Default: ''
+    AllowedPattern: '^\s*([0-9]{17}\s*(,\s*[0-9]{17}\s*)*)?$'
+    ConstraintDescription: >-
+      Must be empty, or a comma-separated list of 17-digit SteamID64 values.
+
+  AdminPermissionLevel:
+    Type: Number
+    Description: >-
+      Permission level given to every id in AdminSteamIds. 0 is full admin,
+      1000 is a default player - LOWER means MORE power.
+    Default: 0
+    MinValue: 0
+    MaxValue: 1000
+
+  # --- World -----------------------------------------------------------------
+
+  GameWorld:
+    Type: String
+    Description: >-
+      RWG for a random-generated world (uses WorldGenSeed and WorldGenSize), or
+      the name of a prebuilt world such as Navezgane.
+    Default: RWG
+    MinLength: 1
+
+  GameName:
+    Type: String
+    Description: >-
+      Save game name. This names the save folder on the persistent volume, so
+      changing it starts a new world rather than loading the existing one.
+    Default: SevenDaysOnAws
+    MinLength: 1
+
+  WorldGenSize:
+    Type: Number
+    Description: >-
+      Random-gen world size in metres; must be a multiple of 1024 between 4096
+      and 16384. Bigger worlds need more memory (see InstanceType).
+    Default: 6144
+    MinValue: 4096
+    MaxValue: 16384
+
+  PlayerKillingMode:
+    Type: Number
+    Description: >-
+      0 = no player killing, 1 = kill allies only, 2 = kill strangers only,
+      3 = kill everyone.
+    AllowedValues:
+      - 0
+      - 1
+      - 2
+      - 3
+    Default: 2
+
+  ServerPropertyOverrides:
+    Type: String
+    Description: >-
+      Escape hatch for every serverconfig.xml property that does not have its
+      own parameter above (land claims, zombie counts, safe zones, EAC,
+      crossplay, dynamic mesh, and so on). Comma-separated Name=Value pairs,
+      e.g. "MaxSpawnedZombies=64,EACEnabled=false,LandClaimSize=41". Each entry
+      replaces that property if the template already writes it, and is appended
+      if it does not. A value may contain an equals sign (only the first one
+      splits the pair) but not a comma, and must be XML-safe.
+    Default: ''
+
+  # --- Console and web dashboard ---------------------------------------------
+
+  TelnetPort:
+    Type: Number
+    Description: >-
+      Port for the telnet console, on localhost only - it is deliberately not
+      opened in the security group. The idle, health, drain and login-watcher
+      scripts all talk to the server through it.
+    Default: 8081
+    MinValue: 1
+    MaxValue: 65535
+
+  WebDashboardEnabled:
+    Type: String
+    Description: >-
+      Whether the game's web dashboard listens on WebDashboardPort. Also not
+      opened in the security group, so reaching it means tunnelling in (e.g.
+      SSH port-forward) - it is not exposed to the internet by this template.
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Default: 'true'
+
+  WebDashboardPort:
+    Type: Number
+    Description: Port for the game's web dashboard.
+    Default: 8080
+    MinValue: 1
+    MaxValue: 65535
+
+  # --- Operational timings ---------------------------------------------------
+
+  IdleGraceMinutes:
+    Type: Number
+    Description: >-
+      How long the server must be continuously empty before the idle check
+      scales the ASG to zero. Only used when AutoShutdown is enabled.
+    Default: 120
+    MinValue: 1
+
+  IdleCheckMinutes:
+    Type: Number
+    Description: How often to check whether any players are connected.
+    Default: 20
+    MinValue: 1
+
+  HealthCheckMinutes:
+    Type: Number
+    Description: >-
+      How often to check that the game console still answers. Also bounds how
+      late the "server is up" email can be, since that is sent on the first
+      successful check of a boot.
+    Default: 5
+    MinValue: 1
+
+  HealthCheckFailureThreshold:
+    Type: Number
+    Description: >-
+      Consecutive unreachable checks before the instance marks itself Unhealthy
+      and lets the ASG replace it. Never applies until the console has answered
+      at least once this boot.
+    Default: 3
+    MinValue: 1
+
+  BackupIntervalHours:
+    Type: Number
+    Description: >-
+      How often to upload a save archive to S3 during a long session. The first
+      archive of each boot is taken 10 minutes in regardless.
+    Default: 24
+    MinValue: 1
+
+  # --- Naming ----------------------------------------------------------------
+
+  AddressObjectKey:
+    Type: String
+    Description: >-
+      Object key written to the S3 bucket above holding the server's
+      "ip:port" address.
+    Default: 7dserver.txt
+    MinLength: 1
+
+  AccessControlTagValue:
+    Type: String
+    Description: >-
+      Value of the AccessControl tag on the ASG and instances. This is what
+      7days.bat filters on and what an IAM policy can condition on to let
+      someone start/stop this server and nothing else. Give each deployment its
+      own value if you run more than one.
+    Default: 7Days
+    MinLength: 1
+
 Resources:
+
+  # --- Server notifications --------------------------------------------------
+  # The instance publishes here when the server becomes joinable, when its host
+  # shuts down, and when a player joins; SNS fans each one out to the email
+  # address in the NotifyEmail SSM parameter. The subscription is declared
+  # inline because there is exactly one, and SNS emails it a confirmation link
+  # on first create - notifications only flow once that link is clicked. The
+  # topic lives in this stack, so deleting and recreating the stack (or changing
+  # the address) means confirming again. DisplayName is what recipients see as
+  # the sender name on the email.
+  NotifyTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AWS::StackName}-notifications
+      DisplayName: 7DTD
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref NotifyEmail
 
   EC2InstanceRole:
     Type: AWS::IAM::Role
@@ -80,18 +358,27 @@ Resources:
       Path: /
       # AmazonSSMManagedInstanceCore lets the pre-installed SSM agent register
       # the instance so we can open Session Manager shells (no SSH/inbound rule).
+      # CloudWatchAgentServerPolicy lets the CloudWatch agent push memory/disk/
+      # swap metrics (cloudwatch:PutMetricData) and read the instance tags it
+      # attaches as dimensions (ec2:DescribeTags).
       ManagedPolicyArns:
         - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy
       Policies:
         - PolicyName: !Sub ${AWS::StackName}-bootstrap
           PolicyDocument:
             Statement:
-              # Publish the static server address for clients to discover.
+              # Publish the static server address for clients to discover, and
+              # upload save archives to the backup bucket (backup.yml) under the
+              # saves/ prefix its lifecycle rule expires.
               - Effect: Allow
                 Action:
                   - s3:PutObject
                 Resource:
-                  - !Sub arn:${AWS::Partition}:s3:::${S3BucketName}/7dserver.txt
+                  - !Sub arn:${AWS::Partition}:s3:::${S3BucketName}/${AddressObjectKey}
+                  - !Sub
+                    - ${BucketArn}/saves/*
+                    - BucketArn: !ImportValue Seven-Days-Server-Backup-Bucket-Arn
               # Read the volume id and Elastic IP from the sibling stacks'
               # exports at boot. ListExports has no resource-level scoping.
               - Effect: Allow
@@ -131,6 +418,20 @@ Resources:
                   - autoscaling:TerminateInstanceInAutoScalingGroup
                 Resource:
                   - !Sub arn:${AWS::Partition}:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${AWS::StackName}-asg
+              # Publish server start/stop and player-login notifications to this
+              # stack's topic.
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Ref NotifyTopic
+              # cfn-init (at boot) and cfn-hup (on every metadata change) read
+              # this stack's resource metadata via DescribeStackResource.
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStackResource
+                Resource:
+                  - !Ref AWS::StackId
 
   EC2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -149,18 +450,1057 @@ Resources:
         - CidrIp: 0.0.0.0/0
           IpProtocol: -1
       SecurityGroupIngress:
-        # Modern 7DTD needs UDP on ServerPort..ServerPort+2 plus TCP on ServerPort.
+        # Modern 7DTD uses TCP + UDP across ServerPort..ServerPort+3 (26900-26903,
+        # the top port covering EOS/crossplay). Open to anywhere over both IPv4
+        # (0.0.0.0/0) and IPv6 (::/0).
         - CidrIp: 0.0.0.0/0
+          FromPort: !Ref PortNumber
+          ToPort: !Ref PortNumberTop
+          IpProtocol: udp
+        - CidrIpv6: ::/0
           FromPort: !Ref PortNumber
           ToPort: !Ref PortNumberTop
           IpProtocol: udp
         - CidrIp: 0.0.0.0/0
           FromPort: !Ref PortNumber
-          ToPort: !Ref PortNumber
+          ToPort: !Ref PortNumberTop
+          IpProtocol: tcp
+        - CidrIpv6: ::/0
+          FromPort: !Ref PortNumber
+          ToPort: !Ref PortNumberTop
           IpProtocol: tcp
 
   LaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
+    Metadata:
+      # The full server bootstrap lives in this LaunchTemplate's
+      # AWS::CloudFormation::Init metadata, fetched from the CloudFormation
+      # service by cfn-init at boot, because EC2 UserData is hard-capped at
+      # 16 KB and the script no longer fits. UserData is now a small stub
+      # that installs the aws-cfn-bootstrap helpers and runs cfn-init;
+      # cfn-hup then re-runs cfn-init in place whenever this Metadata changes.
+      AWS::CloudFormation::Init:
+        configSets:
+          # cfn-hup first so the poll timer is running even if the bootstrap
+          # fails, letting a corrected stack update re-trigger it in place.
+          default:
+            - cfnhup
+            - bootstrap
+          # cfn-hup wiring only - lets an operator refresh the poll units in
+          # place (cfn-init --configsets hup) without re-running the heavy game
+          # bootstrap, which would restart the running server.
+          hup:
+            - cfnhup
+        cfnhup:
+          files:
+            /etc/cfn/cfn-hup.conf:
+              mode: '000400'
+              owner: root
+              group: root
+              content:
+                Fn::Sub: |
+                  [main]
+                  stack=${AWS::StackId}
+                  region=${AWS::Region}
+                  interval=5
+                  verbose=true
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              mode: '000400'
+              owner: root
+              group: root
+              content:
+                Fn::Sub: |
+                  [cfn-auto-reloader-hook]
+                  triggers=post.update
+                  path=Resources.LaunchTemplate.Metadata.AWS::CloudFormation::Init
+                  action=/usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource LaunchTemplate --region ${AWS::Region} --configsets default
+                  runas=root
+            # cfn-hup --no-daemon polls once and exits, so it is driven by a
+            # timer (below) as a oneshot rather than a resident service. Run as
+            # Type=simple with Restart=always it exited cleanly every launch and
+            # systemd relaunched it on RestartSec, producing an endless restart
+            # loop that spammed the journal. No [Install]/enable: the timer
+            # activates the same-named .service when it elapses.
+            /etc/systemd/system/cfn-hup.service:
+              mode: '000644'
+              owner: root
+              group: root
+              content: |
+                [Unit]
+                Description=cfn-hup (poll stack metadata once; scheduled by cfn-hup.timer)
+                After=network-online.target
+                Wants=network-online.target
+
+                [Service]
+                Type=oneshot
+                ExecStart=/usr/local/bin/cfn-hup --no-daemon
+            /etc/systemd/system/cfn-hup.timer:
+              mode: '000644'
+              owner: root
+              group: root
+              content: |
+                [Unit]
+                Description=Periodic cfn-hup poll for stack metadata changes
+
+                [Timer]
+                OnBootSec=2min
+                OnUnitActiveSec=5min
+
+                [Install]
+                WantedBy=timers.target
+          commands:
+            01-daemon-reload:
+              command: systemctl daemon-reload
+            # Enable the timer; idempotent, so cfn-hup re-runs are safe. No need
+            # to disable a prior resident cfn-hup.service: the unit is now a
+            # oneshot with no Restart=always, so even a stale enablement symlink
+            # just polls once at boot instead of restart-looping.
+            02-enable-timer:
+              command: systemctl enable --now cfn-hup.timer
+        bootstrap:
+          files:
+            /opt/bootstrap/run.sh:
+              mode: '000755'
+              owner: root
+              group: root
+              content:
+                Fn::Sub: |
+                  #!/bin/bash
+                  set -euxo pipefail
+                  export DEBIAN_FRONTEND=noninteractive
+                  export AWS_DEFAULT_REGION=${AWS::Region}
+
+                  # --- Packages -------------------------------------------------
+                  # steamcmd is a 32-bit binary, hence the i386 arch + lib32gcc.
+                  # expect/telnet drive the console checks over the telnet console.
+                  dpkg --add-architecture i386
+                  apt-get update -y
+                  apt-get install -y --no-install-recommends \
+                    lib32gcc-s1 expect telnet curl wget tar unzip ca-certificates
+
+                  # Ubuntu 24.04 dropped the 'awscli' apt package, so install AWS CLI
+                  # v2 from Amazon's official installer (arch-aware) at /usr/local/bin/aws.
+                  if ! command -v aws >/dev/null 2>&1; then
+                    case "$(uname -m)" in
+                      aarch64) AWS_CLI_ARCH=aarch64 ;;
+                      *)       AWS_CLI_ARCH=x86_64 ;;
+                    esac
+                    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$AWS_CLI_ARCH.zip" -o /tmp/awscliv2.zip
+                    unzip -q /tmp/awscliv2.zip -d /tmp
+                    /tmp/aws/install
+                    rm -rf /tmp/aws /tmp/awscliv2.zip
+                  fi
+
+                  # --- CloudWatch agent installer (invoked LAST, see call site) -
+                  # Defined here but not run until the end of the bootstrap, so a
+                  # metrics failure cannot abort the game install and, critically,
+                  # the cwagent system user it creates is added only after sdtd's
+                  # id is pinned. Each step short-circuits with an explicit return
+                  # because set -e is suspended while the function is tested by the
+                  # caller. Dimensions are $-bang escaped so Fn::Sub emits them
+                  # literally for the agent to expand at runtime.
+                  install_cloudwatch_agent() {
+                    local arch=amd64
+                    [ "$(uname -m)" = aarch64 ] && arch=arm64
+                    if ! dpkg -s amazon-cloudwatch-agent >/dev/null 2>&1; then
+                      curl -fsSL "https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/$arch/latest/amazon-cloudwatch-agent.deb" -o /tmp/amazon-cloudwatch-agent.deb || return 1
+                      dpkg -i -E /tmp/amazon-cloudwatch-agent.deb || return 1
+                      rm -f /tmp/amazon-cloudwatch-agent.deb
+                    fi
+                    cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWAGENTCFG'
+                  {
+                    "agent": {
+                      "metrics_collection_interval": 60,
+                      "run_as_user": "root"
+                    },
+                    "metrics": {
+                      "namespace": "7DaysServer",
+                      "append_dimensions": {
+                        "InstanceId": "${!aws:InstanceId}",
+                        "InstanceType": "${!aws:InstanceType}",
+                        "AutoScalingGroupName": "${!aws:AutoScalingGroupName}"
+                      },
+                      "aggregation_dimensions": [["AutoScalingGroupName"], ["InstanceId"]],
+                      "metrics_collected": {
+                        "mem": {
+                          "measurement": ["mem_used_percent", "mem_used", "mem_available", "mem_total"]
+                        },
+                        "swap": {
+                          "measurement": ["swap_used_percent"]
+                        },
+                        "disk": {
+                          "measurement": ["used_percent"],
+                          "resources": ["/", "/opt/games"],
+                          "ignore_file_system_types": ["sysfs", "tmpfs", "devtmpfs", "overlay", "squashfs"]
+                        },
+                        "cpu": {
+                          "measurement": ["cpu_usage_idle", "cpu_usage_user", "cpu_usage_system"],
+                          "totalcpu": true
+                        }
+                      }
+                    }
+                  }
+                  CWAGENTCFG
+                    # fetch-config validates the JSON, installs the systemd unit, and
+                    # (re)starts the agent; idempotent, so cfn-hup re-runs are safe.
+                    /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+                      -a fetch-config -m ec2 -s \
+                      -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+                  }
+
+                  # --- Instance identity (IMDSv2) -------------------------------
+                  TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+                  IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+
+                  # --- Cross-stack values (read at boot, not baked into the template)
+                  # The save volume and Elastic IP are created by sibling stacks and
+                  # published as CloudFormation exports; read them via the CLI instead
+                  # of wiring them in as Fn::Sub imports.
+                  get_export() {
+                    aws cloudformation list-exports \
+                      --query "Exports[?Name=='$1'].Value" --output text
+                  }
+                  VOL_ID=$(get_export Seven-Days-Server-Disk)
+                  ALLOC_ID=$(get_export Seven-Days-Server-Address)
+                  PUBLIC_IP=$(get_export Seven-Days-Server-Address-IP)
+                  if [ -z "$VOL_ID" ] || [ "$VOL_ID" = None ]; then
+                    echo "ERROR: export Seven-Days-Server-Disk not found" >&2; exit 1
+                  fi
+                  if [ -z "$ALLOC_ID" ] || [ "$ALLOC_ID" = None ]; then
+                    echo "ERROR: export Seven-Days-Server-Address not found" >&2; exit 1
+                  fi
+                  if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" = None ]; then
+                    echo "ERROR: export Seven-Days-Server-Address-IP not found" >&2; exit 1
+                  fi
+                  # Backup bucket (backup.yml). Non-fatal: a missing bucket only
+                  # disables save backups, it must not block the game from
+                  # starting. The 7dtd-backup script and spot-drain read the name
+                  # from this env file, so both work however they are invoked.
+                  BACKUP_BUCKET=$(get_export Seven-Days-Server-Backup-Bucket)
+                  if [ -n "$BACKUP_BUCKET" ] && [ "$BACKUP_BUCKET" != None ]; then
+                    mkdir -p /etc/7dtd
+                    printf 'BACKUP_BUCKET=%s\n' "$BACKUP_BUCKET" > /etc/7dtd/backup.env
+                  else
+                    rm -f /etc/7dtd/backup.env
+                    echo "WARN: export Seven-Days-Server-Backup-Bucket not found; save backups disabled" >&2
+                  fi
+
+                  # --- Claim the Elastic IP -------------------------------------
+                  # The ASG does not associate EIPs; do it ourselves. --allow-reassociation
+                  # moves the address off any previous instance still releasing it.
+                  for i in $(seq 1 12); do
+                    if aws ec2 associate-address --allocation-id "$ALLOC_ID" --instance-id "$IID" --allow-reassociation >/dev/null 2>&1; then
+                      break
+                    fi
+                    echo "waiting to associate EIP $ALLOC_ID (attempt $i)..." >&2
+                    sleep 5
+                  done
+
+                  # --- Service user ---------------------------------------------
+                  # Pin sdtd to a FIXED uid/gid. The save volume records ownership
+                  # by numeric id, so sdtd must own the same id on every launch.
+                  # Other system users created during boot (notably the CloudWatch
+                  # agent's cwagent) would otherwise claim sdtd's auto-assigned
+                  # --system id first and shift sdtd's, orphaning the game files.
+                  # 1500 sits clear of the --system range and the AMI's ubuntu:1000.
+                  getent group sdtd >/dev/null || groupadd --gid 1500 sdtd
+                  id sdtd &>/dev/null || useradd --uid 1500 --gid 1500 --create-home --home-dir /home/sdtd --shell /usr/sbin/nologin sdtd
+
+                  # --- Attach + mount the persistent save volume ----------------
+                  # The ASG does not attach volumes; attach it to THIS instance and
+                  # wait until the attachment sticks (survives a brief detach race if
+                  # a previous instance is still releasing the volume).
+                  for i in $(seq 1 60); do
+                    if aws ec2 attach-volume --volume-id "$VOL_ID" --instance-id "$IID" --device /dev/sdf >/dev/null 2>&1; then
+                      break
+                    fi
+                    cur=$(aws ec2 describe-volumes --volume-ids "$VOL_ID" --query 'Volumes[0].Attachments[0].InstanceId' --output text 2>/dev/null || true)
+                    if [ "$cur" = "$IID" ]; then
+                      break
+                    fi
+                    echo "waiting to attach $VOL_ID (attempt $i)..." >&2
+                    sleep 5
+                  done
+
+                  # On Nitro instances the EBS volume shows up as an NVMe device with a
+                  # non-deterministic name; the stable path is the by-id symlink keyed on
+                  # the volume id (dashes stripped). Wait for it, then ONLY format when
+                  # the volume has no filesystem - never reformat an existing save.
+                  VOL_NODASH=$(echo "$VOL_ID" | tr -d -)
+                  BYID="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$VOL_NODASH"
+                  for i in $(seq 1 30); do [ -e "$BYID" ] && break; sleep 5; done
+                  DEV=$(readlink -f "$BYID")
+                  mkdir -p /opt/games
+                  if ! blkid "$DEV"; then
+                    mkfs.ext4 -L 7dtd "$DEV"
+                  fi
+                  UUID=$(blkid -s UUID -o value "$DEV")
+                  grep -q "$UUID" /etc/fstab || echo "UUID=$UUID /opt/games ext4 defaults,noatime,nofail 0 2" >> /etc/fstab
+                  mount -a
+
+                  # --- SteamCMD + 7 Days to Die (dedicated server app 294420) ---
+                  # SteamCMD and the game live on the persistent save volume, so a
+                  # fresh ASG instance reuses the existing copy instead of
+                  # reinstalling: only extract SteamCMD when it is missing, and skip
+                  # the full `validate` re-hash once the app manifest exists (a first
+                  # install validates; later boots just run app_update to pick up
+                  # patches, and SteamCMD resumes an interrupted update from its own
+                  # manifest). On a fresh extract SteamCMD self-updates on first run;
+                  # that first invocation can fail with "Failed to install app ...
+                  # (Missing configuration)" before the client is bootstrapped, so
+                  # retry (up to 5 attempts) rather than letting set -e abort the
+                  # whole bootstrap on a transient first-run failure.
+                  mkdir -p /opt/games/steamcmd /opt/games/7days /opt/games/userdata
+                  # Recursive: reclaim any files a prior launch wrote under a
+                  # since-shifted uid (see the fixed-id note above), so steamcmd
+                  # running as sdtd can always write the whole game tree.
+                  chown -R sdtd:sdtd /opt/games
+                  if [ -f /opt/games/7days/steamapps/appmanifest_294420.acf ]; then VALIDATE=""; else VALIDATE="validate"; fi
+                  sudo -u sdtd bash -s -- "$VALIDATE" <<'STEAMCMD'
+                  set -eux
+                  VALIDATE="$1"
+                  cd /opt/games/steamcmd
+                  if [ ! -x ./steamcmd.sh ]; then
+                    curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" | tar zxvf -
+                  fi
+                  n=0
+                  until ./steamcmd.sh +force_install_dir /opt/games/7days +login anonymous +app_update 294420 $VALIDATE +quit; do
+                    n=$((n+1))
+                    if [ "$n" -ge 5 ]; then
+                      echo "ERROR: steamcmd app_update 294420 failed after $n attempts" >&2
+                      exit 1
+                    fi
+                    echo "steamcmd app_update failed (attempt $n), retrying in 15s..." >&2
+                    sleep 15
+                  done
+                  STEAMCMD
+
+                  # --- Server region (EOS server-browser matchmaking) ----------
+                  # 7DTD's Region property buckets the server into one of ten
+                  # fixed matchmaking geographies; map the AWS region we launched
+                  # in to the closest one. The three Oceania ap-southeast zones
+                  # (Sydney/Melbourne/Auckland) are matched before the general
+                  # ap-*/cn-* -> Asia fallthrough. Unknown/new regions default to
+                  # NorthAmericaEast.
+                  case "$AWS_DEFAULT_REGION" in
+                    ap-southeast-2|ap-southeast-4|ap-southeast-6) SERVER_REGION=Oceania ;;
+                    us-east-*|us-gov-east-*|ca-central-*)         SERVER_REGION=NorthAmericaEast ;;
+                    us-west-*|us-gov-west-*|ca-west-*)            SERVER_REGION=NorthAmericaWest ;;
+                    mx-*)                                         SERVER_REGION=CentralAmerica ;;
+                    sa-*)                                         SERVER_REGION=SouthAmerica ;;
+                    eu-*)                                         SERVER_REGION=Europe ;;
+                    me-*|il-*)                                    SERVER_REGION=MiddleEast ;;
+                    af-*)                                         SERVER_REGION=Africa ;;
+                    ap-*|cn-*)                                    SERVER_REGION=Asia ;;
+                    *)                                            SERVER_REGION=NorthAmericaEast ;;
+                  esac
+
+                  # --- Server config (V3.0 serverconfig.xml) --------------------
+                  # Rewritten on every launch: under the ASG the template is the
+                  # source of truth, so config never drifts from what is deployed.
+                  cat > /opt/games/7days/serverconfig.xml <<'SEVENDAYSCFG'
+                  <?xml version="1.0"?>
+                  <ServerSettings>
+                    <property name="ServerIP" value="__PUBLIC_IP__"/>
+                    <property name="ServerPort" value="${PortNumber}"/>
+                    <property name="ServerVisibility" value="${ServerVisibility}"/>
+                    <property name="ServerName" value="${ServerName}"/>
+                    <property name="Region" value="__SERVER_REGION__"/>
+                    <property name="ServerPassword" value="${GamePassword}"/>
+                    <property name="ServerDescription" value="${ServerDescription}"/>
+                    <property name="ServerWebsiteURL" value="${ServerWebsiteURL}"/>
+                    <property name="ServerMaxPlayerCount" value="${ServerMaxPlayerCount}"/>
+                    <property name="ServerReservedSlots" value="${ServerReservedSlots}"/>
+                    <property name="ServerReservedSlotsPermission" value="${ServerReservedSlotsPermission}"/>
+                    <property name="ServerAdminSlots" value="0"/>
+                    <property name="ServerAdminSlotsPermission" value="0"/>
+                    <property name="ServerDisabledNetworkProtocols" value=""/>
+                    <property name="ServerMaxWorldTransferSpeedKiBs" value="1024"/>
+                    <property name="ServerAllowCrossplay" value="false"/>
+                    <property name="EACEnabled" value="true"/>
+                    <property name="IgnoreEOSSanctions" value="false"/>
+
+                    <property name="WebDashboardEnabled" value="${WebDashboardEnabled}"/>
+                    <property name="WebDashboardPort" value="${WebDashboardPort}"/>
+                    <property name="WebDashboardUrl" value=""/>
+                    <property name="EnableMapRendering" value="true"/>
+
+                    <property name="TelnetEnabled" value="true"/>
+                    <property name="TelnetPort" value="${TelnetPort}"/>
+                    <property name="TelnetPassword" value="${AdminPassword}"/>
+                    <property name="TelnetFailedLoginLimit" value="10"/>
+                    <property name="TelnetFailedLoginsBlocktime" value="300"/>
+                    <property name="TerminalWindowEnabled" value="false"/>
+
+                    <property name="AdminFileName" value="serveradmin.xml"/>
+
+                    <property name="GameWorld" value="${GameWorld}"/>
+                    <property name="WorldGenSeed" value="${WorldGenSeed}"/>
+                    <property name="WorldGenSize" value="${WorldGenSize}"/>
+                    <property name="GameName" value="${GameName}"/>
+                    <property name="GameMode" value="GameModeSurvival"/>
+
+                    <!-- V3.0: difficulty, zombie speed, loot, blood moon, day length,
+                         drop-on-death, air drops, etc. are all encoded in SandboxCode. -->
+                    <property name="SandboxCode" value="${SandboxCode}"/>
+
+                    <property name="PlayerKillingMode" value="${PlayerKillingMode}"/>
+                    <property name="PersistentPlayerProfiles" value="false"/>
+                    <property name="PlayerSafeZoneLevel" value="5"/>
+                    <property name="PlayerSafeZoneHours" value="5"/>
+                    <property name="BedrollDeadZoneSize" value="15"/>
+                    <property name="PartySharedKillRange" value="100"/>
+
+                    <property name="LandClaimSize" value="41"/>
+                    <property name="LandClaimDeadZone" value="30"/>
+                    <property name="LandClaimExpiryTime" value="3"/>
+                    <property name="LandClaimDecayMode" value="0"/>
+                    <property name="LandClaimOnlineDurabilityModifier" value="4"/>
+                    <property name="LandClaimOfflineDurabilityModifier" value="4"/>
+
+                    <property name="DynamicMeshEnabled" value="true"/>
+                    <property name="DynamicMeshLandClaimOnly" value="true"/>
+                    <property name="DynamicMeshLandClaimBuffer" value="3"/>
+                    <property name="DynamicMeshMaxItemCache" value="3"/>
+
+                    <property name="MaxSpawnedZombies" value="128"/>
+                    <property name="MaxSpawnedAnimals" value="64"/>
+                    <property name="MaxUncoveredMapChunksPerPlayer" value="131072"/>
+                    <property name="HideCommandExecutionLog" value="3"/>
+                  SEVENDAYSCFG
+                  # NB the heredoc above stops short of </ServerSettings>: the
+                  # override pass below may append properties, and the document is
+                  # closed once it has run.
+                  # The heredoc is single-quoted (no shell expansion), so drop the
+                  # runtime values into their placeholders after the fact.
+                  sed -i \
+                    -e "s/__SERVER_REGION__/$SERVER_REGION/" \
+                    -e "s/__PUBLIC_IP__/$PUBLIC_IP/" \
+                    /opt/games/7days/serverconfig.xml
+
+                  # An SSM parameter cannot hold an empty string, so the literal
+                  # 'none' is how GamePassword asks for an open server. The pattern
+                  # matches the whole rendered line, so no user-supplied text ever
+                  # reaches sed as a pattern.
+                  sed -i \
+                    -e 's|<property name="ServerPassword" value="none"/>|<property name="ServerPassword" value=""/>|' \
+                    /opt/games/7days/serverconfig.xml
+
+                  # --- Property overrides ---------------------------------------
+                  # ServerPropertyOverrides carries Name=Value pairs for every
+                  # serverconfig property without a parameter of its own. Each pair
+                  # replaces that property where the template already writes it, and
+                  # is appended before </ServerSettings> where it does not - so
+                  # properties this template has never heard of can be set too.
+                  set_property() {
+                    local name="$1" value="$2" esc
+                    if grep -q "<property name=\"$name\" " /opt/games/7days/serverconfig.xml; then
+                      # Escape what sed reads specially in a replacement: backslash,
+                      # & (the whole match) and the | delimiter.
+                      esc=$(printf '%s' "$value" | sed -e 's/[\\&|]/\\&/g')
+                      sed -i "s|<property name=\"$name\" value=\"[^\"]*\"/>|<property name=\"$name\" value=\"$esc\"/>|" \
+                        /opt/games/7days/serverconfig.xml
+                      echo "serverconfig: set $name" >&2
+                    else
+                      # Not written by this template: append it verbatim. The
+                      # document is still open, so this is a plain write - no
+                      # insert-before-the-closing-tag rewriting needed.
+                      printf '  <property name="%s" value="%s"/>\n' "$name" "$value" \
+                        >> /opt/games/7days/serverconfig.xml
+                      echo "serverconfig: added $name" >&2
+                    fi
+                  }
+                  # Written via a quoted heredoc rather than an inline shell string
+                  # so quotes or apostrophes in an override value cannot break the
+                  # bootstrap. /run is tmpfs, so it never lands on the save volume.
+                  cat > /run/7dtd-property-overrides <<'PROPOVERRIDES'
+                  ${ServerPropertyOverrides}
+                  PROPOVERRIDES
+                  while IFS= read -r kv; do
+                    # Skip blanks and anything without a Name=Value shape.
+                    case "$kv" in
+                      *=*) ;;
+                      *) continue ;;
+                    esac
+                    ov_name=$(printf '%s' "${!kv%%=*}" | tr -d '[:space:]')
+                    # Split on the FIRST = only, so a value may itself contain one.
+                    ov_value=$(printf '%s' "${!kv#*=}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+                    [ -n "$ov_name" ] || continue
+                    set_property "$ov_name" "$ov_value"
+                  done < <(tr ',' '\n' < /run/7dtd-property-overrides)
+                  rm -f /run/7dtd-property-overrides
+
+                  # Every property is in place; close the document.
+                  echo '</ServerSettings>' >> /opt/games/7days/serverconfig.xml
+
+                  chown sdtd:sdtd /opt/games/7days/serverconfig.xml
+                  # The join and console passwords are in here; keep it off-limits
+                  # to everything but root and the game process that must read it.
+                  chmod 0640 /opt/games/7days/serverconfig.xml
+
+                  # --- Admin permissions (serveradmin.xml) ----------------------
+                  # AdminFileName resolves relative to -userdatafolder, so this
+                  # lives at the userdata root (alongside Saves/, not inside it).
+                  # Rewritten on every launch for the same reason as the config:
+                  # under the ASG the template is the source of truth, so the
+                  # permission list never drifts from what is deployed. NB this
+                  # means in-game ban/whitelist edits do not survive a relaunch.
+                  # 1.0+ schema: <user platform= userid= permission_level= />,
+                  # where a LOWER level means MORE power (0 = full, 1000 = default
+                  # player). The user list is built from the AdminSteamIds
+                  # parameter, which is empty by default: a fresh deployment has no
+                  # admins until its owner names their own Steam ids.
+                  cat > /run/7dtd-admin-ids <<'ADMINIDS'
+                  ${AdminSteamIds}
+                  ADMINIDS
+                  {
+                    echo '<?xml version="1.0"?>'
+                    echo '<adminTools>'
+                    echo '  <users>'
+                    while IFS= read -r steam_id; do
+                      steam_id=$(printf '%s' "$steam_id" | tr -d '[:space:]')
+                      [ -n "$steam_id" ] || continue
+                      printf '    <user platform="Steam" userid="%s" permission_level="%s" />\n' \
+                        "$steam_id" '${AdminPermissionLevel}'
+                    done < <(tr ',' '\n' < /run/7dtd-admin-ids)
+                    echo '  </users>'
+                    echo '  <permissions>'
+                    echo '  </permissions>'
+                    echo '  <whitelist>'
+                    echo '  </whitelist>'
+                    echo '  <blacklist>'
+                    echo '  </blacklist>'
+                    echo '</adminTools>'
+                  } > /opt/games/userdata/serveradmin.xml
+                  rm -f /run/7dtd-admin-ids
+                  chown sdtd:sdtd /opt/games/userdata/serveradmin.xml
+
+                  # --- Telnet console reader ------------------------------------
+                  # Connects to the telnet console and runs listplayers; used by both
+                  # the idle check and the self-heal check below.
+                  cat > /usr/local/bin/7dtd-listplayers <<'LISTPLAYERS'
+                  #!/usr/bin/expect
+                  set timeout 20
+                  spawn telnet localhost ${TelnetPort}
+                  expect -re "Please enter password:"
+                  send "${AdminPassword}\r"
+                  expect -re "end session."
+                  send "listplayers\r"
+                  expect -re "in the game"
+                  send "exit\r"
+                  # Wait for the server to close the socket (EOF) instead of
+                  # tearing it down on script exit; slamming it shut mid-write
+                  # makes the server log an IOException on its telnet thread.
+                  expect eof
+                  LISTPLAYERS
+                  # 0700, not 0755: this file carries the console password, and the
+                  # game itself runs as sdtd. Every caller (the idle, health, drain
+                  # and login-notify units) runs as root.
+                  chmod 0700 /usr/local/bin/7dtd-listplayers
+
+                  # --- Generic telnet console command runner --------------------
+                  # Sends a single arbitrary command to the game console; used by the
+                  # spot-interruption drain to issue saveworld / say.
+                  cat > /usr/local/bin/7dtd-console <<'CONSOLE'
+                  #!/usr/bin/expect
+                  set timeout 20
+                  set cmd [lindex $argv 0]
+                  spawn telnet localhost ${TelnetPort}
+                  expect -re "Please enter password:"
+                  send "${AdminPassword}\r"
+                  expect -re "end session."
+                  send "$cmd\r"
+                  sleep 2
+                  send "exit\r"
+                  expect eof
+                  CONSOLE
+                  # Carries the console password; root-only, as above.
+                  chmod 0700 /usr/local/bin/7dtd-console
+
+                  # --- Save backup to S3 ----------------------------------------
+                  # Flushes the live world to disk (saveworld), tars the userdata
+                  # folder (Saves, generated world, serveradmin.xml) plus the
+                  # serverconfig, and uploads a date-stamped archive. Run daily by
+                  # a timer and once on a spot reclaim. The world save is a small
+                  # subset of the volume, so this file-level archive is far
+                  # cheaper than a whole-volume snapshot and is portable
+                  # (downloadable, restorable anywhere). Retention is handled by
+                  # the bucket's lifecycle rule, not here.
+                  cat > /usr/local/bin/7dtd-backup <<'BACKUP'
+                  #!/bin/bash
+                  set -uo pipefail
+                  export AWS_DEFAULT_REGION=${AWS::Region}
+                  [ -f /etc/7dtd/backup.env ] && . /etc/7dtd/backup.env
+                  if [ -z "${!BACKUP_BUCKET:-}" ]; then
+                    echo "backup: BACKUP_BUCKET unset; skipping" >&2
+                    exit 0
+                  fi
+                  STAMP=$(date -u +%Y-%m-%d_%H%M%S)
+                  DEST="s3://$BACKUP_BUCKET/saves/7dtd-$STAMP.tar.gz"
+                  # Flush to disk first so the archive is consistent. If the
+                  # console is unreachable (server down) we still archive whatever
+                  # is on disk - a slightly stale save beats no save.
+                  if ! /usr/local/bin/7dtd-console "saveworld" >/dev/null 2>&1; then
+                    echo "backup: saveworld console unreachable; archiving on-disk state" >&2
+                  fi
+                  sleep 3
+                  TMP=$(mktemp /opt/games/7dtd-backup.XXXXXX.tar.gz)
+                  trap 'rm -f "$TMP"' EXIT
+                  if ! tar czf "$TMP" -C /opt/games userdata 7days/serverconfig.xml; then
+                    echo "backup: ERROR tar failed" >&2
+                    exit 1
+                  fi
+                  if aws s3 cp "$TMP" "$DEST"; then
+                    echo "backup: uploaded $DEST" >&2
+                  else
+                    echo "backup: ERROR upload to $DEST failed" >&2
+                    exit 1
+                  fi
+                  BACKUP
+                  chmod 0755 /usr/local/bin/7dtd-backup
+
+                  # --- Notification helper --------------------------------------
+                  # 7dtd-notify <subject> <body>: the single SNS publish path for
+                  # every notification (server up, host shutting down, player
+                  # joined), so the topic and the message shape live in one place.
+                  # SNS requires an ASCII subject with no control characters, under
+                  # 100 chars, so it is stripped and truncated rather than losing
+                  # the notification to a rejected publish (the body keeps the text
+                  # as-is - message bodies are UTF-8 clean). The strip runs under
+                  # LC_ALL=C deliberately: tr works on bytes, and in a UTF-8 locale
+                  # [:alnum:] matches accented letters, so their multi-byte
+                  # encodings would survive into a subject SNS then rejects. Always
+                  # exits 0: a failed publish is logged, never propagated, because
+                  # no caller of this helper should change what it does just
+                  # because an email did not go out.
+                  cat > /usr/local/bin/7dtd-notify <<'NOTIFY'
+                  #!/bin/bash
+                  export AWS_DEFAULT_REGION=${AWS::Region}
+                  TOPIC="${NotifyTopic}"
+                  subject=$(printf '%s' "$1" | LC_ALL=C tr -cd '[:alnum:] :_.,-' | cut -c1-100)
+                  [ -n "$subject" ] || subject="7DTD"
+                  if aws sns publish --topic-arn "$TOPIC" --subject "$subject" \
+                    --message "$2
+                  Server: __PUBLIC_IP__:${PortNumber}" >/dev/null; then
+                    echo "notify: sent '$subject'" >&2
+                  else
+                    echo "notify: ERROR publish failed for '$subject'" >&2
+                  fi
+                  exit 0
+                  NOTIFY
+                  # Same placeholder trick as serverconfig.xml: the heredoc is
+                  # single-quoted, so the Elastic IP is dropped in afterwards.
+                  sed -i -e "s/__PUBLIC_IP__/$PUBLIC_IP/" /usr/local/bin/7dtd-notify
+                  chmod 0755 /usr/local/bin/7dtd-notify
+
+                  # --- Telnet console log stream --------------------------------
+                  # The telnet console streams the server's live log to every
+                  # connected client, so this is a long-lived login + read-forever
+                  # session that prints that stream on stdout for the login watcher
+                  # below to filter. Reading the log this way (rather than the
+                  # game's own timestamped output_log_dedi__*.txt, which gets a new
+                  # name on every launch) keeps it on the same console the idle and
+                  # health checks already rely on. `timeout -1` after the login
+                  # blocks forever; when the server goes away the socket closes and
+                  # the script exits, and systemd reconnects.
+                  cat > /usr/local/bin/7dtd-log-stream <<'LOGSTREAM'
+                  #!/usr/bin/expect
+                  # stdout here is a pipe into the login watcher, not a tty. Tcl
+                  # chooses its buffering per channel type, so pin it off: block
+                  # buffering would hold log lines back until several KB had
+                  # accumulated, and on a quiet server that stalls a login email
+                  # for as long as the server stays quiet.
+                  fconfigure stdout -buffering none
+                  set timeout 20
+                  spawn telnet localhost ${TelnetPort}
+                  expect -re "Please enter password:"
+                  send "${AdminPassword}\r"
+                  expect -re "end session."
+                  set timeout -1
+                  expect eof
+                  LOGSTREAM
+                  # Carries the console password; root-only, as above.
+                  chmod 0700 /usr/local/bin/7dtd-log-stream
+
+                  # --- Player login notifications -------------------------------
+                  # Filters the console log stream and publishes to the SNS topic on
+                  # each join. 7DTD emits exactly one global message per login:
+                  #   ... INF GMSG: Player 'SomePlayer' joined the game
+                  # so that line is the event - one email per login, and leaves are
+                  # deliberately ignored. Only matched lines are ever echoed, so the
+                  # raw stream (which carries the console password exchange) never
+                  # reaches the journal.
+                  cat > /usr/local/bin/7dtd-login-notify <<'LOGINNOTIFY'
+                  #!/bin/bash
+                  # No filter between the stream and the loop: any extra stage
+                  # (tr, grep, sed) would block-buffer the pipe and sit on lines.
+                  # The console's trailing CR is harmless - it lands outside the
+                  # quoted player name the match below extracts.
+                  /usr/local/bin/7dtd-log-stream | while IFS= read -r line; do
+                    case "$line" in
+                      # Chat is echoed to the console too, so a player could type a
+                      # fake join line; drop chat before matching anything.
+                      *"Chat ("*) continue ;;
+                      *"INF GMSG: Player "*"joined the game"*) ;;
+                      *) continue ;;
+                    esac
+                    player=$(printf '%s' "$line" | sed -n "s/.*INF GMSG: Player '\(.*\)' joined the game.*/\1/p")
+                    [ -n "$player" ] || player=unknown
+                    when=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+                    /usr/local/bin/7dtd-notify "7DTD: $player joined the game" \
+                      "$player joined the 7 Days to Die server at $when."
+                  done
+                  LOGINNOTIFY
+                  chmod 0755 /usr/local/bin/7dtd-login-notify
+
+                  # --- Idle check (scale the ASG to zero) -----------------------
+                  # Connects to the telnet console, runs listplayers, and scales the
+                  # ASG to zero (terminate THIS instance + decrement desired capacity)
+                  # only once the server has been positively empty for a continuous
+                  # grace window (IdleGraceMinutes) - so a brief lull after players leave does not
+                  # tear the server down. The "empty since" timestamp lives on tmpfs
+                  # (/run) so it resets each launch. A player being present clears it;
+                  # an unreachable console leaves it untouched (a transient telnet blip
+                  # must not reset the window), and never triggers a scale-down.
+                  cat > /usr/local/bin/7dtd-idle-check <<'IDLECHECK'
+                  #!/bin/bash
+                  export AWS_DEFAULT_REGION=${AWS::Region}
+                  STATE=/run/7dtd-idle
+                  EMPTY_SINCE="$STATE/empty_since"
+                  GRACE=$(( ${IdleGraceMinutes} * 60 ))
+                  mkdir -p "$STATE"
+                  output=$(/usr/local/bin/7dtd-listplayers 2>/dev/null || true)
+                  number=$(echo "$output" | grep "in the game" | grep -Eo "[0-9]+" | head -1)
+                  # No positive read: do nothing and leave the empty timer as-is.
+                  [ -n "$number" ] || exit 0
+                  if [ "$number" -gt 0 ]; then
+                    rm -f "$EMPTY_SINCE"
+                    exit 0
+                  fi
+                  # Positively empty: start the grace clock on the first empty read.
+                  now=$(date +%s)
+                  [ -f "$EMPTY_SINCE" ] || echo "$now" > "$EMPTY_SINCE"
+                  since=$(cat "$EMPTY_SINCE" 2>/dev/null || echo "$now")
+                  elapsed=$((now - since))
+                  if [ "$elapsed" -lt "$GRACE" ]; then
+                    echo "7dtd empty for $elapsed s of $GRACE s grace; not scaling down yet" >&2
+                    exit 0
+                  fi
+                  echo "7dtd empty for $elapsed s (>= $GRACE s grace); scaling ASG to zero" >&2
+                  # Leave the reason for the shutdown notification that follows.
+                  mkdir -p /run/7dtd-notify
+                  echo "no players for $((elapsed / 60)) minutes, so it idle-stopped itself" > /run/7dtd-notify/stop_reason
+                  TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+                  IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+                  aws autoscaling terminate-instance-in-auto-scaling-group \
+                    --instance-id "$IID" --should-decrement-desired-capacity
+                  IDLECHECK
+                  chmod 0755 /usr/local/bin/7dtd-idle-check
+
+                  # --- Self-heal check (replace a wedged game process) ----------
+                  # If the console was reachable before but has since stopped
+                  # responding for THRESHOLD consecutive checks, mark THIS instance
+                  # Unhealthy so the ASG replaces it. Fail-safe: do nothing until the
+                  # server has been healthy at least once this boot (state lives on
+                  # tmpfs /run so it resets each launch), which prevents killing a
+                  # slow first boot / world-gen. Dead hosts are handled underneath by
+                  # the ASG's EC2 status-check health type.
+                  #
+                  # This check also owns the server-up notification: the moment it
+                  # first sees a console answer is the moment the server is loaded
+                  # and joinable, which is exactly what the ready mark records - so
+                  # the email is sent where that mark is created, once per boot, and
+                  # needs no extra polling or log parsing of its own. The cost is
+                  # latency: up to one timer interval (HealthCheckMinutes) after the server is
+                  # actually up.
+                  cat > /usr/local/bin/7dtd-health-check <<'HEALTHCHECK'
+                  #!/bin/bash
+                  export AWS_DEFAULT_REGION=${AWS::Region}
+                  STATE=/run/7dtd-health
+                  READY_MARK="$STATE/was_healthy"
+                  FAILS_FILE="$STATE/fails"
+                  THRESHOLD=${HealthCheckFailureThreshold}
+                  mkdir -p "$STATE"
+                  output=$(/usr/local/bin/7dtd-listplayers 2>/dev/null || true)
+                  if echo "$output" | grep -q "in the game"; then
+                    echo 0 > "$FAILS_FILE"
+                    if [ ! -f "$READY_MARK" ]; then
+                      /usr/local/bin/7dtd-notify "7DTD: server is up" \
+                        "The 7 Days to Die server has finished loading and is ready to join."
+                    fi
+                    touch "$READY_MARK"
+                    exit 0
+                  fi
+                  # Unreachable: ignore entirely until the server has been healthy once.
+                  [ -f "$READY_MARK" ] || exit 0
+                  fails=$(cat "$FAILS_FILE" 2>/dev/null || echo 0)
+                  fails=$((fails+1))
+                  echo "$fails" > "$FAILS_FILE"
+                  if [ "$fails" -ge "$THRESHOLD" ]; then
+                    TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+                    IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+                    echo "7dtd console unreachable for $fails checks; marking $IID Unhealthy" >&2
+                    # Leave the reason for the shutdown notification that follows
+                    # once the ASG acts on the Unhealthy mark and terminates.
+                    mkdir -p /run/7dtd-notify
+                    echo "the game console stopped responding, so the instance was marked unhealthy and is being replaced" > /run/7dtd-notify/stop_reason
+                    aws autoscaling set-instance-health --instance-id "$IID" --health-status Unhealthy
+                  fi
+                  HEALTHCHECK
+                  chmod 0755 /usr/local/bin/7dtd-health-check
+
+                  # --- Shutdown notification ------------------------------------
+                  # Sent from the ExecStop of a RemainAfterExit oneshot (see the
+                  # unit below), which is how systemd gets a "the host is going
+                  # away" hook that still has networking. The reason is whatever
+                  # the path that initiated the shutdown left behind (idle-stop,
+                  # spot reclaim, unhealthy replacement); a plain 7days.bat stop
+                  # leaves nothing, hence the generic fallback. A hard kill (host
+                  # failure, or a stop with no ACPI shutdown) never runs this, so
+                  # the absence of a shutdown email is not proof the server is up.
+                  cat > /usr/local/bin/7dtd-stop-notify <<'STOPNOTIFY'
+                  #!/bin/bash
+                  reason=$(cat /run/7dtd-notify/stop_reason 2>/dev/null || true)
+                  [ -n "$reason" ] || reason="it was stopped (desired capacity set to 0, or the instance was replaced)"
+                  up=$(uptime -p 2>/dev/null | sed -e 's/^up //' || true)
+                  [ -n "$up" ] || up=unknown
+                  /usr/local/bin/7dtd-notify "7DTD: server is shutting down" \
+                    "The 7 Days to Die server is shutting down: $reason.
+                  It was up for $up. The world save is on the persistent volume, so starting the server again resumes it."
+                  STOPNOTIFY
+                  chmod 0755 /usr/local/bin/7dtd-stop-notify
+
+                  # --- Spot interruption drain ----------------------------------
+                  # Poll IMDS for the ~2-minute spot interruption notice; on the
+                  # warning, save the world and warn players so a reclaim costs at
+                  # most a reconnect (the ASG relaunches and the replacement
+                  # reattaches the same save volume). On on-demand instances the
+                  # metadata stays 404 and this loop simply idles.
+                  cat > /usr/local/bin/7dtd-spot-drain <<'SPOTDRAIN'
+                  #!/bin/bash
+                  while true; do
+                    T=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+                    action=$(curl -s -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/meta-data/spot/instance-action)
+                    if echo "$action" | grep -q '"action"'; then
+                      echo "spot interruption notice received; saving world" >&2
+                      # Leave the reason for the shutdown notification that follows.
+                      mkdir -p /run/7dtd-notify
+                      echo "its spot capacity was reclaimed by AWS (the ASG will relaunch it and the save volume reattaches)" > /run/7dtd-notify/stop_reason
+                      /usr/local/bin/7dtd-console "say \"Server reclaim imminent - saving and restarting shortly\"" || true
+                      # saveworld flushes to the volume (which reattaches on
+                      # relaunch); the backup also pushes an off-volume S3 copy
+                      # before the box is reclaimed. Both best-effort.
+                      /usr/local/bin/7dtd-console "saveworld" || true
+                      /usr/local/bin/7dtd-backup || true
+                      sleep 10
+                      exit 0
+                    fi
+                    sleep 5
+                  done
+                  SPOTDRAIN
+                  chmod 0755 /usr/local/bin/7dtd-spot-drain
+
+                  # --- systemd units --------------------------------------------
+                  cat > /etc/systemd/system/7dtd.service <<'SERVERUNIT'
+                  [Unit]
+                  Description=7 Days to Die Dedicated Server
+                  After=network-online.target opt-games.mount
+                  Wants=network-online.target
+                  RequiresMountsFor=/opt/games
+
+                  [Service]
+                  Type=simple
+                  User=sdtd
+                  Group=sdtd
+                  WorkingDirectory=/opt/games/7days
+                  ExecStart=/opt/games/7days/startserver.sh -configfile=/opt/games/7days/serverconfig.xml -userdatafolder=/opt/games/userdata
+                  Restart=always
+                  RestartSec=15
+                  # 7DTD warns that the default 1024 open-file limit can crash the
+                  # server and recommends >=10240. systemd services ignore
+                  # /etc/security/limits.conf (that is PAM), so raise it here.
+                  LimitNOFILE=100000
+
+                  [Install]
+                  WantedBy=multi-user.target
+                  SERVERUNIT
+
+                  cat > /etc/systemd/system/7dtd-idle.service <<'IDLEUNIT'
+                  [Unit]
+                  Description=Scale the ASG to zero when the 7DTD server is empty
+
+                  [Service]
+                  Type=oneshot
+                  ExecStart=/usr/local/bin/7dtd-idle-check
+                  IDLEUNIT
+
+                  cat > /etc/systemd/system/7dtd-idle.timer <<'IDLETIMER'
+                  [Unit]
+                  Description=Periodic idle-player check for the 7DTD server
+
+                  [Timer]
+                  OnBootSec=15min
+                  OnUnitActiveSec=${IdleCheckMinutes}min
+
+                  [Install]
+                  WantedBy=timers.target
+                  IDLETIMER
+
+                  cat > /etc/systemd/system/7dtd-health.service <<'HEALTHUNIT'
+                  [Unit]
+                  Description=Self-heal check for a wedged 7DTD server process
+
+                  [Service]
+                  Type=oneshot
+                  ExecStart=/usr/local/bin/7dtd-health-check
+                  HEALTHUNIT
+
+                  cat > /etc/systemd/system/7dtd-health.timer <<'HEALTHTIMER'
+                  [Unit]
+                  Description=Periodic self-heal check for the 7DTD server
+
+                  [Timer]
+                  OnBootSec=${HealthCheckMinutes}min
+                  OnUnitActiveSec=${HealthCheckMinutes}min
+
+                  [Install]
+                  WantedBy=timers.target
+                  HEALTHTIMER
+
+                  cat > /etc/systemd/system/7dtd-spot-drain.service <<'SPOTUNIT'
+                  [Unit]
+                  Description=Save the 7DTD world on a spot interruption notice
+                  After=7dtd.service
+
+                  [Service]
+                  Type=simple
+                  ExecStart=/usr/local/bin/7dtd-spot-drain
+                  Restart=on-failure
+                  RestartSec=10
+
+                  [Install]
+                  WantedBy=multi-user.target
+                  SPOTUNIT
+
+                  cat > /etc/systemd/system/7dtd-backup.service <<'BACKUPUNIT'
+                  [Unit]
+                  Description=Back up the 7DTD save to S3
+                  After=7dtd.service
+
+                  [Service]
+                  Type=oneshot
+                  ExecStart=/usr/local/bin/7dtd-backup
+                  BACKUPUNIT
+
+                  cat > /etc/systemd/system/7dtd-backup.timer <<'BACKUPTIMER'
+                  [Unit]
+                  Description=Periodic S3 backup of the 7DTD save
+
+                  [Timer]
+                  # 10 min after boot captures each play session shortly after the
+                  # world loads; the BackupIntervalHours cadence covers marathon
+                  # sessions. The server idle-stops when empty, so an idle
+                  # (unchanging) world is simply never backed up - no wasted uploads.
+                  OnBootSec=10min
+                  OnUnitActiveSec=${BackupIntervalHours}h
+
+                  [Install]
+                  WantedBy=timers.target
+                  BACKUPTIMER
+
+                  # A oneshot that does nothing on start and notifies on stop.
+                  # Shutdown reverses ordering, so ordering it After the network
+                  # means systemd stops it - running ExecStop - while networking (and
+                  # therefore SNS and the IMDS credentials) is still up. Nothing
+                  # must ever `systemctl restart` this unit: a restart runs ExecStop
+                  # and would email a shutdown that is not happening, which is why
+                  # the message text lives in a separate script file that cfn-hup can
+                  # rewrite in place without touching the unit.
+                  cat > /etc/systemd/system/7dtd-stop-notify.service <<'STOPUNIT'
+                  [Unit]
+                  Description=Email a notification when the 7DTD server host shuts down
+                  After=network-online.target 7dtd.service
+                  Wants=network-online.target
+
+                  [Service]
+                  Type=oneshot
+                  RemainAfterExit=yes
+                  ExecStart=/bin/true
+                  ExecStop=/usr/local/bin/7dtd-stop-notify
+
+                  [Install]
+                  WantedBy=multi-user.target
+                  STOPUNIT
+
+                  cat > /etc/systemd/system/7dtd-login-notify.service <<'LOGINUNIT'
+                  [Unit]
+                  Description=Email a notification when a player joins the 7DTD server
+                  After=7dtd.service
+
+                  [Service]
+                  Type=simple
+                  ExecStart=/usr/local/bin/7dtd-login-notify
+                  # The watcher exits whenever the console session drops (server
+                  # restarting, still generating a world, or reclaimed), so it must
+                  # be restarted to reconnect. RestartSec is deliberately long: while
+                  # the server is down this is a reconnect poll, and a short interval
+                  # would just spam the journal.
+                  Restart=always
+                  RestartSec=60
+
+                  [Install]
+                  WantedBy=multi-user.target
+                  LOGINUNIT
+
+                  systemctl daemon-reload
+                  systemctl enable --now 7dtd.service
+                  # Idle auto-shutdown is toggled by the AutoShutdown parameter.
+                  # cfn-hup re-runs this on a parameter change, so flipping it to
+                  # disabled stops the timer on a running server (and vice versa).
+                  if [ "${AutoShutdown}" = enabled ]; then
+                    systemctl enable --now 7dtd-idle.timer
+                  else
+                    systemctl disable --now 7dtd-idle.timer 2>/dev/null || true
+                  fi
+                  systemctl enable --now 7dtd-health.timer
+                  systemctl enable --now 7dtd-spot-drain.service
+                  # Restart (not just enable) so a cfn-hup re-run picks up an edited
+                  # watcher script instead of leaving the old one connected.
+                  systemctl enable 7dtd-login-notify.service
+                  systemctl restart 7dtd-login-notify.service
+                  # enable --now only, never restart: restarting this one fires its
+                  # ExecStop and emails a shutdown that is not happening.
+                  systemctl enable --now 7dtd-stop-notify.service
+                  # Save backups only run if the backup bucket export was found
+                  # (env file written above); otherwise stay disabled.
+                  if [ -f /etc/7dtd/backup.env ]; then
+                    systemctl enable --now 7dtd-backup.timer
+                  else
+                    systemctl disable --now 7dtd-backup.timer 2>/dev/null || true
+                  fi
+
+                  # --- Publish the static server address to S3 ------------------
+                  # Uses the Elastic IP read from the export - no IMDS race, no guessing.
+                  # Local name is fixed; only the S3 key is configurable (and may
+                  # contain a prefix, which a temp filename could not).
+                  echo "$PUBLIC_IP:${PortNumber}" > /tmp/7dtd-address.txt
+                  aws s3 cp /tmp/7dtd-address.txt s3://${S3BucketName}/${AddressObjectKey}
+
+                  # --- CloudWatch agent (memory / disk / swap / cpu) ------------
+                  # EC2 only publishes CPU, network and EBS metrics out of the box;
+                  # in-guest memory, swap and filesystem usage need the CloudWatch
+                  # agent. Deliberately LAST and wrapped so a metrics-setup failure
+                  # can never abort the game bootstrap under set -e (installing the
+                  # agent also creates the cwagent system user, which is why it must
+                  # run after sdtd is pinned - see the service-user note above). The
+                  # config's $-dimensions are $-bang escaped so Fn::Sub emits them
+                  # literally for the agent to expand at runtime.
+                  if ! install_cloudwatch_agent; then
+                    echo "WARN: CloudWatch agent setup failed; server is unaffected" >&2
+                  fi
+          commands:
+            01-run-bootstrap:
+              command: /opt/bootstrap/run.sh
     Properties:
       LaunchTemplateName: !Sub ${AWS::StackName}-lt
       LaunchTemplateData:
@@ -178,419 +1518,38 @@ Resources:
           - ResourceType: instance
             Tags:
               - Key: Name
-                Value: 7DaysServer
+                Value: !Ref ServerName
               - Key: AccessControl
-                Value: 7Days
+                Value: !Ref AccessControlTagValue
         UserData:
           Fn::Base64:
             Fn::Sub: |
               #!/bin/bash
               set -euxo pipefail
               export DEBIAN_FRONTEND=noninteractive
-              export AWS_DEFAULT_REGION=${AWS::Region}
 
-              # --- Packages -------------------------------------------------
-              # steamcmd is a 32-bit binary, hence the i386 arch + lib32gcc.
-              # expect/telnet drive the console checks over the telnet console.
-              dpkg --add-architecture i386
+              # The full bootstrap lives in this LaunchTemplate's Metadata
+              # (AWS::CloudFormation::Init) because UserData is capped at 16 KB.
+              # aws-cfn-bootstrap (cfn-init/cfn-hup) is not packaged for Ubuntu,
+              # so install it from pip; 24.04 marks the base environment
+              # externally managed (PEP 668), hence --break-system-packages on
+              # this single-purpose host.
               apt-get update -y
-              apt-get install -y --no-install-recommends \
-                lib32gcc-s1 expect telnet curl wget tar unzip ca-certificates
+              apt-get install -y --no-install-recommends python3-pip
+              pip3 install --break-system-packages \
+                https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
 
-              # Ubuntu 24.04 dropped the 'awscli' apt package, so install AWS CLI
-              # v2 from Amazon's official installer (arch-aware) at /usr/local/bin/aws.
-              if ! command -v aws >/dev/null 2>&1; then
-                case "$(uname -m)" in
-                  aarch64) AWS_CLI_ARCH=aarch64 ;;
-                  *)       AWS_CLI_ARCH=x86_64 ;;
-                esac
-                curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$AWS_CLI_ARCH.zip" -o /tmp/awscliv2.zip
-                unzip -q /tmp/awscliv2.zip -d /tmp
-                /tmp/aws/install
-                rm -rf /tmp/aws /tmp/awscliv2.zip
-              fi
-
-              # --- Instance identity (IMDSv2) -------------------------------
-              TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
-              IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-
-              # --- Cross-stack values (read at boot, not baked into the template)
-              # The save volume and Elastic IP are created by sibling stacks and
-              # published as CloudFormation exports; read them via the CLI instead
-              # of wiring them in as Fn::Sub imports.
-              get_export() {
-                aws cloudformation list-exports \
-                  --query "Exports[?Name=='$1'].Value" --output text
-              }
-              VOL_ID=$(get_export Seven-Days-Server-Disk)
-              ALLOC_ID=$(get_export Seven-Days-Server-Address)
-              PUBLIC_IP=$(get_export Seven-Days-Server-Address-IP)
-              if [ -z "$VOL_ID" ] || [ "$VOL_ID" = None ]; then
-                echo "ERROR: export Seven-Days-Server-Disk not found" >&2; exit 1
-              fi
-              if [ -z "$ALLOC_ID" ] || [ "$ALLOC_ID" = None ]; then
-                echo "ERROR: export Seven-Days-Server-Address not found" >&2; exit 1
-              fi
-              if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" = None ]; then
-                echo "ERROR: export Seven-Days-Server-Address-IP not found" >&2; exit 1
-              fi
-
-              # --- Claim the Elastic IP -------------------------------------
-              # The ASG does not associate EIPs; do it ourselves. --allow-reassociation
-              # moves the address off any previous instance still releasing it.
-              for i in $(seq 1 12); do
-                if aws ec2 associate-address --allocation-id "$ALLOC_ID" --instance-id "$IID" --allow-reassociation >/dev/null 2>&1; then
-                  break
+              # Put the helpers on a stable path for the systemd unit and the
+              # reloader hook, then run cfn-init to materialize and execute the
+              # bootstrap from Metadata. cfn-init also enables/starts cfn-hup
+              # (see the services block), so later Metadata changes re-run it.
+              for b in cfn-init cfn-hup cfn-signal cfn-get-metadata; do
+                src=$(command -v "$b" || true)
+                if [ -n "$src" ] && [ "$src" != "/usr/local/bin/$b" ]; then
+                  ln -sf "$src" "/usr/local/bin/$b"
                 fi
-                echo "waiting to associate EIP $ALLOC_ID (attempt $i)..." >&2
-                sleep 5
               done
-
-              # --- Service user ---------------------------------------------
-              id sdtd &>/dev/null || useradd --system --create-home --home-dir /home/sdtd --shell /usr/sbin/nologin sdtd
-
-              # --- Attach + mount the persistent save volume ----------------
-              # The ASG does not attach volumes; attach it to THIS instance and
-              # wait until the attachment sticks (survives a brief detach race if
-              # a previous instance is still releasing the volume).
-              for i in $(seq 1 60); do
-                if aws ec2 attach-volume --volume-id "$VOL_ID" --instance-id "$IID" --device /dev/sdf >/dev/null 2>&1; then
-                  break
-                fi
-                cur=$(aws ec2 describe-volumes --volume-ids "$VOL_ID" --query 'Volumes[0].Attachments[0].InstanceId' --output text 2>/dev/null || true)
-                if [ "$cur" = "$IID" ]; then
-                  break
-                fi
-                echo "waiting to attach $VOL_ID (attempt $i)..." >&2
-                sleep 5
-              done
-
-              # On Nitro instances the EBS volume shows up as an NVMe device with a
-              # non-deterministic name; the stable path is the by-id symlink keyed on
-              # the volume id (dashes stripped). Wait for it, then ONLY format when
-              # the volume has no filesystem - never reformat an existing save.
-              VOL_NODASH=$(echo "$VOL_ID" | tr -d -)
-              BYID="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$VOL_NODASH"
-              for i in $(seq 1 30); do [ -e "$BYID" ] && break; sleep 5; done
-              DEV=$(readlink -f "$BYID")
-              mkdir -p /opt/games
-              if ! blkid "$DEV"; then
-                mkfs.ext4 -L 7dtd "$DEV"
-              fi
-              UUID=$(blkid -s UUID -o value "$DEV")
-              grep -q "$UUID" /etc/fstab || echo "UUID=$UUID /opt/games ext4 defaults,noatime,nofail 0 2" >> /etc/fstab
-              mount -a
-
-              # --- SteamCMD + 7 Days to Die (dedicated server app 294420) ---
-              # SteamCMD and the game live on the persistent save volume, so a
-              # fresh ASG instance reuses the existing copy instead of
-              # reinstalling: only extract SteamCMD when it is missing, and skip
-              # the full `validate` re-hash once the app manifest exists (a first
-              # install validates; later boots just run app_update to pick up
-              # patches, and SteamCMD resumes an interrupted update from its own
-              # manifest). On a fresh extract SteamCMD self-updates on first run;
-              # that first invocation can fail with "Failed to install app ...
-              # (Missing configuration)" before the client is bootstrapped, so
-              # retry (up to 5 attempts) rather than letting set -e abort the
-              # whole bootstrap on a transient first-run failure.
-              mkdir -p /opt/games/steamcmd /opt/games/7days /opt/games/userdata
-              chown sdtd:sdtd /opt/games /opt/games/steamcmd /opt/games/7days /opt/games/userdata
-              if [ -f /opt/games/7days/steamapps/appmanifest_294420.acf ]; then VALIDATE=""; else VALIDATE="validate"; fi
-              sudo -u sdtd bash -s -- "$VALIDATE" <<'STEAMCMD'
-              set -eux
-              VALIDATE="$1"
-              cd /opt/games/steamcmd
-              if [ ! -x ./steamcmd.sh ]; then
-                curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" | tar zxvf -
-              fi
-              n=0
-              until ./steamcmd.sh +force_install_dir /opt/games/7days +login anonymous +app_update 294420 $VALIDATE +quit; do
-                n=$((n+1))
-                if [ "$n" -ge 5 ]; then
-                  echo "ERROR: steamcmd app_update 294420 failed after $n attempts" >&2
-                  exit 1
-                fi
-                echo "steamcmd app_update failed (attempt $n), retrying in 15s..." >&2
-                sleep 15
-              done
-              STEAMCMD
-
-              # --- Server config (V3.0 serverconfig.xml) --------------------
-              # Rewritten on every launch: under the ASG the template is the
-              # source of truth, so config never drifts from what is deployed.
-              cat > /opt/games/7days/serverconfig.xml <<'SEVENDAYSCFG'
-              <?xml version="1.0"?>
-              <ServerSettings>
-                <property name="ServerPort" value="${PortNumber}"/>
-                <property name="ServerVisibility" value="2"/>
-                <property name="ServerName" value="Ru's 7dtd Server"/>
-                <property name="ServerPassword" value="${ServerPassword}"/>
-                <property name="ServerDescription" value="A 7 Days to Die server"/>
-                <property name="ServerWebsiteURL" value=""/>
-                <property name="ServerMaxPlayerCount" value="8"/>
-                <property name="ServerReservedSlots" value="0"/>
-                <property name="ServerReservedSlotsPermission" value="100"/>
-                <property name="ServerAdminSlots" value="0"/>
-                <property name="ServerAdminSlotsPermission" value="0"/>
-                <property name="ServerDisabledNetworkProtocols" value=""/>
-                <property name="ServerMaxWorldTransferSpeedKiBs" value="512"/>
-                <property name="ServerAllowCrossplay" value="false"/>
-                <property name="EACEnabled" value="true"/>
-                <property name="IgnoreEOSSanctions" value="false"/>
-
-                <property name="WebDashboardEnabled" value="true"/>
-                <property name="WebDashboardPort" value="8080"/>
-                <property name="WebDashboardUrl" value=""/>
-                <property name="EnableMapRendering" value="true"/>
-
-                <property name="TelnetEnabled" value="true"/>
-                <property name="TelnetPort" value="8081"/>
-                <property name="TelnetPassword" value="${ServerPassword}"/>
-                <property name="TelnetFailedLoginLimit" value="10"/>
-                <property name="TelnetFailedLoginsBlocktime" value="300"/>
-                <property name="TerminalWindowEnabled" value="false"/>
-
-                <property name="AdminFileName" value="serveradmin.xml"/>
-
-                <property name="GameWorld" value="RWG"/>
-                <property name="WorldGenSeed" value="${WorldGenSeed}"/>
-                <property name="WorldGenSize" value="6144"/>
-                <property name="GameName" value="Midway"/>
-                <property name="GameMode" value="GameModeSurvival"/>
-
-                <!-- V3.0: difficulty, zombie speed, loot, blood moon, day length,
-                     drop-on-death, air drops, etc. are all encoded in SandboxCode. -->
-                <property name="SandboxCode" value="${SandboxCode}"/>
-
-                <property name="PlayerKillingMode" value="3"/>
-                <property name="PersistentPlayerProfiles" value="false"/>
-                <property name="PlayerSafeZoneLevel" value="5"/>
-                <property name="PlayerSafeZoneHours" value="5"/>
-                <property name="BedrollDeadZoneSize" value="15"/>
-                <property name="PartySharedKillRange" value="100"/>
-
-                <property name="LandClaimSize" value="41"/>
-                <property name="LandClaimDeadZone" value="30"/>
-                <property name="LandClaimExpiryTime" value="3"/>
-                <property name="LandClaimDecayMode" value="0"/>
-                <property name="LandClaimOnlineDurabilityModifier" value="4"/>
-                <property name="LandClaimOfflineDurabilityModifier" value="4"/>
-
-                <property name="DynamicMeshEnabled" value="true"/>
-                <property name="DynamicMeshLandClaimOnly" value="true"/>
-                <property name="DynamicMeshLandClaimBuffer" value="3"/>
-                <property name="DynamicMeshMaxItemCache" value="3"/>
-
-                <property name="MaxSpawnedZombies" value="60"/>
-                <property name="MaxSpawnedAnimals" value="50"/>
-                <property name="MaxUncoveredMapChunksPerPlayer" value="131072"/>
-                <property name="HideCommandExecutionLog" value="0"/>
-              </ServerSettings>
-              SEVENDAYSCFG
-              chown sdtd:sdtd /opt/games/7days/serverconfig.xml
-
-              # --- Telnet console reader ------------------------------------
-              # Connects to the telnet console and runs listplayers; used by both
-              # the idle check and the self-heal check below.
-              cat > /usr/local/bin/7dtd-listplayers <<'LISTPLAYERS'
-              #!/usr/bin/expect
-              set timeout 20
-              spawn telnet localhost 8081
-              expect -re "Please enter password:"
-              send "${ServerPassword}\r"
-              expect -re "end session."
-              send "listplayers\r"
-              expect -re "in the game"
-              send "exit\r"
-              LISTPLAYERS
-              chmod 0755 /usr/local/bin/7dtd-listplayers
-
-              # --- Generic telnet console command runner --------------------
-              # Sends a single arbitrary command to the game console; used by the
-              # spot-interruption drain to issue saveworld / say.
-              cat > /usr/local/bin/7dtd-console <<'CONSOLE'
-              #!/usr/bin/expect
-              set timeout 20
-              set cmd [lindex $argv 0]
-              spawn telnet localhost 8081
-              expect -re "Please enter password:"
-              send "${ServerPassword}\r"
-              expect -re "end session."
-              send "$cmd\r"
-              sleep 2
-              send "exit\r"
-              expect eof
-              CONSOLE
-              chmod 0755 /usr/local/bin/7dtd-console
-
-              # --- Idle check (scale the ASG to zero) -----------------------
-              # Connects to the telnet console, runs listplayers, and terminates
-              # THIS instance while decrementing desired capacity to 0 ONLY when
-              # it positively reads zero players. A plain OS shutdown would just
-              # be relaunched while desired capacity is 1. If the server/telnet is
-              # unreachable the number stays empty and we do NOT scale down.
-              cat > /usr/local/bin/7dtd-idle-check <<'IDLECHECK'
-              #!/bin/bash
-              export AWS_DEFAULT_REGION=${AWS::Region}
-              output=$(/usr/local/bin/7dtd-listplayers 2>/dev/null || true)
-              number=$(echo "$output" | grep "in the game" | grep -Eo "[0-9]+" | head -1)
-              if [ -n "$number" ] && [ "$number" -eq 0 ]; then
-                TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
-                IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-                aws autoscaling terminate-instance-in-auto-scaling-group \
-                  --instance-id "$IID" --should-decrement-desired-capacity
-              fi
-              IDLECHECK
-              chmod 0755 /usr/local/bin/7dtd-idle-check
-
-              # --- Self-heal check (replace a wedged game process) ----------
-              # If the console was reachable before but has since stopped
-              # responding for THRESHOLD consecutive checks, mark THIS instance
-              # Unhealthy so the ASG replaces it. Fail-safe: do nothing until the
-              # server has been healthy at least once this boot (state lives on
-              # tmpfs /run so it resets each launch), which prevents killing a
-              # slow first boot / world-gen. Dead hosts are handled underneath by
-              # the ASG's EC2 status-check health type.
-              cat > /usr/local/bin/7dtd-health-check <<'HEALTHCHECK'
-              #!/bin/bash
-              export AWS_DEFAULT_REGION=${AWS::Region}
-              STATE=/run/7dtd-health
-              READY_MARK="$STATE/was_healthy"
-              FAILS_FILE="$STATE/fails"
-              THRESHOLD=3
-              mkdir -p "$STATE"
-              output=$(/usr/local/bin/7dtd-listplayers 2>/dev/null || true)
-              if echo "$output" | grep -q "in the game"; then
-                echo 0 > "$FAILS_FILE"
-                touch "$READY_MARK"
-                exit 0
-              fi
-              # Unreachable: ignore entirely until the server has been healthy once.
-              [ -f "$READY_MARK" ] || exit 0
-              fails=$(cat "$FAILS_FILE" 2>/dev/null || echo 0)
-              fails=$((fails+1))
-              echo "$fails" > "$FAILS_FILE"
-              if [ "$fails" -ge "$THRESHOLD" ]; then
-                TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
-                IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-                echo "7dtd console unreachable for $fails checks; marking $IID Unhealthy" >&2
-                aws autoscaling set-instance-health --instance-id "$IID" --health-status Unhealthy
-              fi
-              HEALTHCHECK
-              chmod 0755 /usr/local/bin/7dtd-health-check
-
-              # --- Spot interruption drain ----------------------------------
-              # Poll IMDS for the ~2-minute spot interruption notice; on the
-              # warning, save the world and warn players so a reclaim costs at
-              # most a reconnect (the ASG relaunches and the replacement
-              # reattaches the same save volume). On on-demand instances the
-              # metadata stays 404 and this loop simply idles.
-              cat > /usr/local/bin/7dtd-spot-drain <<'SPOTDRAIN'
-              #!/bin/bash
-              while true; do
-                T=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
-                action=$(curl -s -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/meta-data/spot/instance-action)
-                if echo "$action" | grep -q '"action"'; then
-                  echo "spot interruption notice received; saving world" >&2
-                  /usr/local/bin/7dtd-console "say \"Server reclaim imminent - saving and restarting shortly\"" || true
-                  /usr/local/bin/7dtd-console "saveworld" || true
-                  sleep 10
-                  exit 0
-                fi
-                sleep 5
-              done
-              SPOTDRAIN
-              chmod 0755 /usr/local/bin/7dtd-spot-drain
-
-              # --- systemd units --------------------------------------------
-              cat > /etc/systemd/system/7dtd.service <<'SERVERUNIT'
-              [Unit]
-              Description=7 Days to Die Dedicated Server
-              After=network-online.target opt-games.mount
-              Wants=network-online.target
-              RequiresMountsFor=/opt/games
-
-              [Service]
-              Type=simple
-              User=sdtd
-              Group=sdtd
-              WorkingDirectory=/opt/games/7days
-              ExecStart=/opt/games/7days/startserver.sh -configfile=/opt/games/7days/serverconfig.xml -userdatafolder=/opt/games/userdata
-              Restart=always
-              RestartSec=15
-
-              [Install]
-              WantedBy=multi-user.target
-              SERVERUNIT
-
-              cat > /etc/systemd/system/7dtd-idle.service <<'IDLEUNIT'
-              [Unit]
-              Description=Scale the ASG to zero when the 7DTD server is empty
-
-              [Service]
-              Type=oneshot
-              ExecStart=/usr/local/bin/7dtd-idle-check
-              IDLEUNIT
-
-              cat > /etc/systemd/system/7dtd-idle.timer <<'IDLETIMER'
-              [Unit]
-              Description=Periodic idle-player check for the 7DTD server
-
-              [Timer]
-              OnBootSec=15min
-              OnUnitActiveSec=20min
-
-              [Install]
-              WantedBy=timers.target
-              IDLETIMER
-
-              cat > /etc/systemd/system/7dtd-health.service <<'HEALTHUNIT'
-              [Unit]
-              Description=Self-heal check for a wedged 7DTD server process
-
-              [Service]
-              Type=oneshot
-              ExecStart=/usr/local/bin/7dtd-health-check
-              HEALTHUNIT
-
-              cat > /etc/systemd/system/7dtd-health.timer <<'HEALTHTIMER'
-              [Unit]
-              Description=Periodic self-heal check for the 7DTD server
-
-              [Timer]
-              OnBootSec=5min
-              OnUnitActiveSec=5min
-
-              [Install]
-              WantedBy=timers.target
-              HEALTHTIMER
-
-              cat > /etc/systemd/system/7dtd-spot-drain.service <<'SPOTUNIT'
-              [Unit]
-              Description=Save the 7DTD world on a spot interruption notice
-              After=7dtd.service
-
-              [Service]
-              Type=simple
-              ExecStart=/usr/local/bin/7dtd-spot-drain
-              Restart=on-failure
-              RestartSec=10
-
-              [Install]
-              WantedBy=multi-user.target
-              SPOTUNIT
-
-              systemctl daemon-reload
-              systemctl enable --now 7dtd.service
-              systemctl enable --now 7dtd-idle.timer
-              systemctl enable --now 7dtd-health.timer
-              systemctl enable --now 7dtd-spot-drain.service
-
-              # --- Publish the static server address to S3 ------------------
-              # Uses the Elastic IP read from the export - no IMDS race, no guessing.
-              echo "$PUBLIC_IP:${PortNumber}" > /tmp/7dserver.txt
-              aws s3 cp /tmp/7dserver.txt s3://${S3BucketName}/7dserver.txt
-
+              /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource LaunchTemplate --region ${AWS::Region} --configsets default
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
@@ -635,10 +1594,10 @@ Resources:
       HealthCheckGracePeriod: 600
       Tags:
         - Key: Name
-          Value: 7DaysServer
+          Value: !Ref ServerName
           PropagateAtLaunch: true
         - Key: AccessControl
-          Value: 7Days
+          Value: !Ref AccessControlTagValue
           PropagateAtLaunch: true
 
 Outputs:

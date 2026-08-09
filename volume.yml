@@ -1,6 +1,62 @@
 AWSTemplateFormatVersion:          '2010-09-09'
 Description:                       'EBS Volume for 7 Days to Die'
 
+Parameters:
+
+  VolumeSize:
+    Type: Number
+    Description: >-
+      Size of the save volume in GiB. The game install, SteamCMD and the world
+      save all live on it; 100 is comfortable for a large random-gen world.
+    Default: 100
+    MinValue: 8
+    MaxValue: 16384
+
+  VolumeType:
+    Type: String
+    Description: >-
+      EBS volume type for the save volume. gp3 is the right answer for this
+      workload: its 3000 IOPS / 125 MiB/s baseline applies at any size and
+      comfortably covers chunk loading and save flushes, which is all the game
+      asks of the disk. gp2 is listed only for completeness - at 100 GiB it
+      baselines at 300 IOPS and leans on burst credits. io1/io2 are provisioned
+      IOPS and simply cost more for headroom a 7DTD server does not use. The
+      HDD types st1/sc1 are deliberately absent: random chunk reads are the
+      wrong workload for them, and their 125 GiB minimum would not accept the
+      default VolumeSize anyway.
+    AllowedValues:
+      - gp3
+      - gp2
+      - io1
+      - io2
+    Default: gp3
+
+  AvailabilityZoneSuffix:
+    Type: String
+    Description: >-
+      Which AZ in the region to create the volume in, as the letter suffix. A
+      single EBS volume attaches to one instance in one AZ, so the ASG must
+      launch into this same AZ - pass instance.yml a SubnetId that lives here.
+      Change it if your chosen instance type is not offered in the -a AZ.
+    Default: a
+    AllowedPattern: '^[a-z]$'
+    ConstraintDescription: A single lower-case letter, e.g. a, b or c.
+
+  VolumeName:
+    Type: String
+    Description: Value of the Name tag on the volume.
+    Default: 7DaysServerSave
+    MinLength: 1
+
+  BackupTagValue:
+    Type: String
+    Description: >-
+      Value of the Backup tag that backup.yml's Data Lifecycle Manager policy
+      targets for daily snapshots. Must match the BackupTagValue passed to
+      backup.yml.
+    Default: 7dtd-daily
+    MinLength: 1
+
 Resources:
   Volume:
     Type: AWS::EC2::Volume
@@ -10,9 +66,17 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      AvailabilityZone: !Sub ${AWS::Region}a
-      Size: 100
-      VolumeType: gp3
+      AvailabilityZone: !Sub ${AWS::Region}${AvailabilityZoneSuffix}
+      Size: !Ref VolumeSize
+      VolumeType: !Ref VolumeType
+      # The Backup tag is what the Data Lifecycle Manager policy in backup.yml
+      # targets for daily EBS snapshots; the same value must be passed to both
+      # stacks (BackupTagValue), or the volume stops being snapshotted.
+      Tags:
+        - Key: Name
+          Value: !Ref VolumeName
+        - Key: Backup
+          Value: !Ref BackupTagValue
 
 Outputs:
   VolumeId:

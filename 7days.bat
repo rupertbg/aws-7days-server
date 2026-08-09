@@ -1,8 +1,17 @@
 @echo off
 setlocal
-set region="ap-southeast-6"
 set action=%1
 set profile=%2
+
+rem Region and the AccessControl tag are configurable without editing this file:
+rem   set SEVENDAYS_REGION=ap-southeast-2
+rem   set SEVENDAYS_TAG=7Days
+rem Leaving SEVENDAYS_REGION unset uses whatever region the AWS CLI resolves
+rem from the profile or environment. SEVENDAYS_TAG must match the
+rem AccessControlTagValue parameter the instance stack was deployed with.
+if "%SEVENDAYS_TAG%" == "" set SEVENDAYS_TAG=7Days
+set regionarg=
+if not "%SEVENDAYS_REGION%" == "" set regionarg=--region %SEVENDAYS_REGION%
 
 if "%profile%" == "" set profile="default"
 
@@ -17,10 +26,10 @@ goto Run
   goto:EOF
 
 :Run
-  FOR /F "tokens=* USEBACKQ" %%F IN (`aws --profile %profile% --region %region% autoscaling describe-auto-scaling-groups --filters "Name=tag:AccessControl,Values=7Days" --query AutoScalingGroups[0].AutoScalingGroupName --output text`) DO (set asg=%%F)
+  FOR /F "tokens=* USEBACKQ" %%F IN (`aws --profile %profile% %regionarg% autoscaling describe-auto-scaling-groups --filters "Name=tag:AccessControl,Values=%SEVENDAYS_TAG%" --query AutoScalingGroups[0].AutoScalingGroupName --output text`) DO (set asg=%%F)
   if "%asg%" == "" goto NoAsg
   if "%asg%" == "None" goto NoAsg
-  aws --profile %profile% --region %region% autoscaling set-desired-capacity --auto-scaling-group-name %asg% --desired-capacity %desired% --output text
+  aws --profile %profile% %regionarg% autoscaling set-desired-capacity --auto-scaling-group-name %asg% --desired-capacity %desired% --output text
   echo | set /p="Set %asg% desired capacity to %desired%"
   goto:EOF
 

@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion:          '2010-09-09'
+Description:                       'Backups for 7 Days to Die: S3 save archives + daily EBS snapshots'
+
+# Deployed as its own stack (like the volume) so backups outlive the instance
+# stack: tearing down or replacing instance.yml never touches saved backups.
+# Deploy AFTER volume.yml (the snapshot policy targets the volume by tag) and
+# BEFORE instance.yml (which imports the bucket ARN for its upload permission).
+
+Parameters:
+
+  RetentionDays:
+    Type: Number
+    Description: >-
+      How long to keep S3 save archives, and how many daily EBS snapshots of the
+      save volume to retain.
+    Default: 14
+
+  SnapshotTimeUTC:
+    Type: String
+    Description: >-
+      UTC time of day (HH:MM) for the daily EBS snapshot. Pick a quiet hour for
+      wherever your players are.
+    Default: '16:00'
+    AllowedPattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+    ConstraintDescription: Must be a 24-hour HH:MM time, e.g. 16:00.
+
+  BackupTagValue:
+    Type: String
+    Description: >-
+      Value of the Backup tag identifying the volume to snapshot. Must match
+      the BackupTagValue passed to volume.yml.
+    Default: 7dtd-daily
+    MinLength: 1
+
+Resources:
+
+  # --- S3 save archives (part A) --------------------------------------------
+  # The bootstrap tars the world save + config and uploads it here daily and on
+  # a spot reclaim. Private + encrypted; a lifecycle rule expires archives after
+  # RetentionDays so storage stays bounded without any cleanup code.
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # Account + region suffix keeps the (globally unique) bucket name from
+      # colliding with other accounts deploying this same template.
+      BucketName: !Sub 7days-server-backup-${AWS::AccountId}-${AWS::Region}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-save-archives
+            Status: Enabled
+            Prefix: saves/
+            ExpirationInDays: !Ref RetentionDays
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 3
+
+  # --- Daily EBS snapshots of the save volume (part B) ----------------------
+  # Data Lifecycle Manager snapshots the volume by tag whether or not an
+  # instance is attached (and the volume is usually detached when the server is
+  # idle-scaled to zero, so most snapshots are perfectly clean). Whole-volume
+  # DR that complements the file-level S3 archives above.
+  DlmRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-dlm
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: dlm.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole
+
+  SnapshotPolicy:
+    Type: AWS::DLM::LifecyclePolicy
+    Properties:
+      Description: Daily snapshots of the 7DTD save volume
+      State: ENABLED
+      ExecutionRoleArn: !GetAtt DlmRole.Arn
+      PolicyDetails:
+        PolicyType: EBS_SNAPSHOT_MANAGEMENT
+        ResourceTypes:
+          - VOLUME
+        # Matches the tag set on the volume in volume.yml.
+        TargetTags:
+          - Key: Backup
+            Value: !Ref BackupTagValue
+        Schedules:
+          - Name: DailySnapshots
+            CreateRule:
+              Interval: 24
+              IntervalUnit: HOURS
+              Times:
+                - !Ref SnapshotTimeUTC
+            RetainRule:
+              Count: !Ref RetentionDays
+            CopyTags: true
+
+Outputs:
+
+  BackupBucketName:
+    Description: Name of the S3 bucket holding 7DTD save archives
+    Value: !Ref BackupBucket
+    Export:
+      Name: Seven-Days-Server-Backup-Bucket
+
+  BackupBucketArn:
+    Description: ARN of the S3 bucket holding 7DTD save archives
+    Value: !GetAtt BackupBucket.Arn
+    Export:
+      Name: Seven-Days-Server-Backup-Bucket-Arn

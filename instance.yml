@@ -303,6 +303,31 @@ Parameters:
     Default: 24
     MinValue: 1
 
+  DailyRefresh:
+    Type: String
+    Description: >-
+      Whether the instance replaces itself once a day, so a long-lived server
+      picks up a fresh host, whatever AMIID now resolves to, and a fresh spot
+      pool instead of accumulating uptime. The refresh only fires when the
+      server is empty; players connected at that moment defer it to the next
+      day, so a server occupied every day at DailyRefreshTime never refreshes.
+      Toggling this on a running server takes effect within the cfn-hup poll
+      interval.
+    AllowedValues:
+      - enabled
+      - disabled
+    Default: enabled
+
+  DailyRefreshTime:
+    Type: String
+    Description: >-
+      Time of day in UTC, HH:MM, that the daily refresh checks whether it can
+      replace the instance. Pick an hour nobody plays; the default is early
+      morning in New Zealand, an hour ahead of backup.yml's default snapshot
+      time so the snapshot catches a just-saved volume.
+    Default: '15:00'
+    AllowedPattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
+
   # --- Naming ----------------------------------------------------------------
 
   AddressObjectKey:
@@ -410,8 +435,9 @@ Resources:
                   - ec2:DescribeVolumes
                   - ec2:DescribeAddresses
                 Resource: '*'
-              # Idle-stop (terminate + decrement) and self-heal (set unhealthy),
-              # scoped to this stack's Auto Scaling Group.
+              # Idle-stop (terminate + decrement), daily refresh (terminate,
+              # keeping desired capacity so the ASG relaunches) and self-heal
+              # (set unhealthy), scoped to this stack's Auto Scaling Group.
               - Effect: Allow
                 Action:
                   - autoscaling:SetInstanceHealth
@@ -1249,6 +1275,43 @@ Resources:
                   HEALTHCHECK
                   chmod 0755 /usr/local/bin/7dtd-health-check
 
+                  # --- Daily refresh (replace this instance) --------------------
+                  # Replace the instance once a day so a long-lived server picks up a
+                  # fresh host, whatever the AMI parameter now resolves to, and a
+                  # fresh spot pool, rather than accumulating uptime on one box.
+                  # Terminates WITHOUT decrementing desired capacity, so the ASG
+                  # launches a replacement that reattaches the same save volume (the
+                  # attach loop above already waits out the detach race). Acts only on
+                  # a positively empty read: players connected defer the refresh to
+                  # the next daily fire rather than interrupting a session, and an
+                  # unreachable console is left to the health check, which is the one
+                  # that owns a wedged server.
+                  cat > /usr/local/bin/7dtd-daily-refresh <<'REFRESH'
+                  #!/bin/bash
+                  export AWS_DEFAULT_REGION=${AWS::Region}
+                  output=$(/usr/local/bin/7dtd-listplayers 2>/dev/null || true)
+                  number=$(echo "$output" | grep "in the game" | grep -Eo "[0-9]+" | head -1)
+                  if [ -z "$number" ]; then
+                    echo "refresh: console unreachable; not replacing this instance" >&2
+                    exit 0
+                  fi
+                  if [ "$number" -gt 0 ]; then
+                    echo "refresh: $number player(s) connected; deferring to the next daily run" >&2
+                    exit 0
+                  fi
+                  echo "refresh: server empty; archiving the save and replacing this instance" >&2
+                  # Best-effort: the world is on the volume the replacement reattaches,
+                  # so a failed archive is not a reason to keep a stale instance.
+                  /usr/local/bin/7dtd-backup || true
+                  # Leave the reason for the shutdown notification that follows.
+                  mkdir -p /run/7dtd-notify
+                  echo "the daily refresh replaced it with a fresh instance" > /run/7dtd-notify/stop_reason
+                  TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+                  IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+                  aws autoscaling terminate-instance-in-auto-scaling-group --instance-id "$IID"
+                  REFRESH
+                  chmod 0755 /usr/local/bin/7dtd-daily-refresh
+
                   # --- Shutdown notification ------------------------------------
                   # Sent from the ExecStop of a RemainAfterExit oneshot (see the
                   # unit below), which is how systemd gets a "the host is going
@@ -1408,6 +1471,31 @@ Resources:
                   WantedBy=timers.target
                   BACKUPTIMER
 
+                  cat > /etc/systemd/system/7dtd-refresh.service <<'REFRESHUNIT'
+                  [Unit]
+                  Description=Replace the 7DTD instance once a day while it is empty
+                  After=7dtd.service
+
+                  [Service]
+                  Type=oneshot
+                  ExecStart=/usr/local/bin/7dtd-daily-refresh
+                  REFRESHUNIT
+
+                  cat > /etc/systemd/system/7dtd-refresh.timer <<'REFRESHTIMER'
+                  [Unit]
+                  Description=Daily refresh check for the 7DTD server
+
+                  [Timer]
+                  OnCalendar=*-*-* ${DailyRefreshTime}:00
+                  # Not Persistent: a missed fire means no instance was running then, so
+                  # the next launch is already fresher than a refresh would make it, and
+                  # catching up on boot would replace a minutes-old instance.
+                  Persistent=false
+
+                  [Install]
+                  WantedBy=timers.target
+                  REFRESHTIMER
+
                   # A oneshot that does nothing on start and notifies on stop.
                   # Shutdown reverses ordering, so ordering it After the network
                   # means systemd stops it - running ExecStop - while networking (and
@@ -1463,6 +1551,13 @@ Resources:
                     systemctl disable --now 7dtd-idle.timer 2>/dev/null || true
                   fi
                   systemctl enable --now 7dtd-health.timer
+                  # Daily instance replacement is toggled by the DailyRefresh
+                  # parameter, live on a running server via cfn-hup like AutoShutdown.
+                  if [ "${DailyRefresh}" = enabled ]; then
+                    systemctl enable --now 7dtd-refresh.timer
+                  else
+                    systemctl disable --now 7dtd-refresh.timer 2>/dev/null || true
+                  fi
                   systemctl enable --now 7dtd-spot-drain.service
                   # Restart (not just enable) so a cfn-hup re-run picks up an edited
                   # watcher script instead of leaving the old one connected.

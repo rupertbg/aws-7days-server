@@ -237,7 +237,7 @@ Parameters:
       Escape hatch for every serverconfig.xml property that does not have its
       own parameter above (land claims, zombie counts, safe zones, EAC,
       crossplay, dynamic mesh, and so on). Comma-separated Name=Value pairs,
-      e.g. "MaxSpawnedZombies=64,EACEnabled=false,LandClaimSize=41". Each entry
+      e.g. "MaxSpawnedZombies=64,EACEnabled=true,LandClaimSize=41". Each entry
       replaces that property if the template already writes it, and is appended
       if it does not. A value may contain an equals sign (only the first one
       splits the pair) but not a comma, and must be XML-safe.
@@ -855,7 +855,7 @@ Resources:
                     <property name="ServerDisabledNetworkProtocols" value=""/>
                     <property name="ServerMaxWorldTransferSpeedKiBs" value="1024"/>
                     <property name="ServerAllowCrossplay" value="false"/>
-                    <property name="EACEnabled" value="true"/>
+                    <property name="EACEnabled" value="false"/>
                     <property name="IgnoreEOSSanctions" value="false"/>
 
                     <property name="WebDashboardEnabled" value="${WebDashboardEnabled}"/>

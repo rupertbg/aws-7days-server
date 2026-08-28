@@ -861,7 +861,10 @@ Resources:
                     <property name="WebDashboardEnabled" value="${WebDashboardEnabled}"/>
                     <property name="WebDashboardPort" value="${WebDashboardPort}"/>
                     <property name="WebDashboardUrl" value=""/>
-                    <property name="EnableMapRendering" value="true"/>
+                    <!-- Off: tile rendering writes to the save volume on every
+                         explored chunk, and only the web dashboard map reads
+                         the tiles. Set true if you want that map. -->
+                    <property name="EnableMapRendering" value="false"/>
 
                     <property name="TelnetEnabled" value="true"/>
                     <property name="TelnetPort" value="${TelnetPort}"/>
@@ -901,7 +904,7 @@ Resources:
                     <property name="DynamicMeshLandClaimBuffer" value="3"/>
                     <property name="DynamicMeshMaxItemCache" value="3"/>
 
-                    <property name="MaxSpawnedZombies" value="128"/>
+                    <property name="MaxSpawnedZombies" value="64"/>
                     <property name="MaxSpawnedAnimals" value="64"/>
                     <property name="MaxUncoveredMapChunksPerPlayer" value="131072"/>
                     <property name="HideCommandExecutionLog" value="3"/>

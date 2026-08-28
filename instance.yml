@@ -978,8 +978,9 @@ Resources:
                   chmod 0640 /opt/games/7days/serverconfig.xml
 
                   # --- Admin permissions (serveradmin.xml) ----------------------
-                  # AdminFileName resolves relative to -userdatafolder, so this
-                  # lives at the userdata root (alongside Saves/, not inside it).
+                  # AdminFileName resolves relative to the SaveGameFolder, which
+                  # is <userdatafolder>/Saves - NOT the userdata root. Written at
+                  # the root the game never reads it and writes its own default.
                   # Rewritten on every launch for the same reason as the config:
                   # under the ASG the template is the source of truth, so the
                   # permission list never drifts from what is deployed. NB this
@@ -992,6 +993,8 @@ Resources:
                   cat > /run/7dtd-admin-ids <<'ADMINIDS'
                   ${AdminSteamIds}
                   ADMINIDS
+                  # On a first boot the game has not created Saves/ yet.
+                  install -d -o sdtd -g sdtd /opt/games/userdata/Saves
                   {
                     echo '<?xml version="1.0"?>'
                     echo '<adminTools>'
@@ -1010,9 +1013,9 @@ Resources:
                     echo '  <blacklist>'
                     echo '  </blacklist>'
                     echo '</adminTools>'
-                  } > /opt/games/userdata/serveradmin.xml
+                  } > /opt/games/userdata/Saves/serveradmin.xml
                   rm -f /run/7dtd-admin-ids
-                  chown sdtd:sdtd /opt/games/userdata/serveradmin.xml
+                  chown sdtd:sdtd /opt/games/userdata/Saves/serveradmin.xml
 
                   # --- Telnet console reader ------------------------------------
                   # Connects to the telnet console and runs listplayers; used by both

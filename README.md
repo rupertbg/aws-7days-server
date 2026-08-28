@@ -99,7 +99,7 @@ The main 7 Days to Die server configuration is a `serverconfig.xml` written to `
 As of 7 Days to Die V3.0, gameplay settings (difficulty, zombie speed, loot, blood moon, drop-on-death, day length, air drops, etc.) are no longer individual properties. They are all encoded in a single `SandboxCode` string, exposed here as the `SandboxCode` CloudFormation parameter. Generate your own from the in-game Sandbox Options menu; the default is the standard Adventurer preset.
 
 ### Parameters
-Every parameter has a working default except `SubnetId`, `VpcId` and `KeyPair`, so a default deployment gives you an unnamed public server with no admins and no join password.
+Every parameter has a working default except `SubnetId`, `VpcId` and `KeyPair`, so a default deployment gives you an unnamed public server with no admins, and no join password if `7days-game-password` holds `none`. Four defaults - `GamePassword`, `AdminPassword`, `S3BucketName` and `NotifyEmail` - are SSM parameter *names*, and those parameters must exist before you deploy (step 4 below).
 
 | Parameter | Default | What it does |
 | --- | --- | --- |
@@ -111,8 +111,8 @@ Every parameter has a working default except `SubnetId`, `VpcId` and `KeyPair`, 
 | `ServerReservedSlots` / `ServerReservedSlotsPermission` | `2` / `100` | Slots held for players at or above that permission level. |
 | `AdminSteamIds` | empty | Comma-separated SteamID64s to make admins. **Empty means nobody is an admin.** |
 | `AdminPermissionLevel` | `0` | Level given to those ids. 0 is full admin, 1000 is a plain player: lower means more power. |
-| `GamePassword` | SSM `7days-game-password` | Join password. See below. |
-| `AdminPassword` | SSM `7days-admin-password` | Console password. See below. |
+| `GamePassword` | `7days-game-password` | **Name of** the SSM parameter holding the join password. See below. |
+| `AdminPassword` | `7days-admin-password` | **Name of** the SSM parameter holding the console password. See below. |
 | `GameWorld` | `RWG` | `RWG` for random-gen, or a prebuilt world such as `Navezgane`. |
 | `GameName` | `SevenDaysOnAws` | Save name. Changing it starts a new world instead of loading the existing save. |
 | `WorldGenSeed` / `WorldGenSize` | `SevenDaysOnAws` / `6144` | Random-gen seed and size (4096-16384, multiple of 1024). Only used for `RWG`, and only when the world is first generated. |
@@ -133,10 +133,12 @@ Every parameter has a working default except `SubnetId`, `VpcId` and `KeyPair`, 
 `volume.yml` takes `VolumeSize` (100 GiB), `VolumeType` (gp3), `AvailabilityZoneSuffix` (`a`), `VolumeName` and `BackupTagValue`. `backup.yml` takes `RetentionDays` (14), `SnapshotTimeUTC` (16:00) and the matching `BackupTagValue`.
 
 ### Passwords
-There are two, deliberately separate, and both are read from SSM Parameter Store so no password is ever committed to the template:
+There are two, deliberately separate, and both are read from SSM Parameter Store so no password is ever committed to the template.
 
-- **`GamePassword`** is what players type to join. Because an SSM parameter cannot hold an empty string, set it to the literal `none` to run an **open server** that anyone with the address can join. That is the setup this repo's defaults describe: a public listing (`ServerVisibility=2`) with no join password.
-- **`AdminPassword`** is the server console (`TelnetPassword`) password. It is an operator credential, not a player one: the idle check, self-heal check, spot drain and login watcher all drive the game through that console. The telnet port is bound on the instance and is not opened by the security group, and the scripts holding this password are root-only (`0700`) so the game process itself cannot read it.
+**Both template parameters take an SSM parameter *name*, not a password.** `GamePassword` defaults to `7days-game-password` and `AdminPassword` to `7days-admin-password`; the passwords themselves are the *values* you store under those names. Typing a password - or the literal `none` - into the template parameter makes CloudFormation look for an SSM parameter of that name, and the stack fails.
+
+- **`GamePassword`** names the parameter holding what players type to join. An SSM parameter cannot hold an empty string, so store the literal text `none` **in that SSM parameter** to run an **open server** that anyone with the address can join. That is the setup this repo's defaults describe: a public listing (`ServerVisibility=2`) with no join password.
+- **`AdminPassword`** names the parameter holding the server console (`TelnetPassword`) password. It is an operator credential, not a player one: the idle check, self-heal check, spot drain and login watcher all drive the game through that console. The telnet port is bound on the instance and is not opened by the security group, and the scripts holding this password are root-only (`0700`) so the game process itself cannot read it.
 
 The web dashboard, when enabled, authenticates through the game's own admin/permission system rather than a separate password property, and its port is likewise not exposed by the security group.
 
@@ -160,7 +162,7 @@ There are four CloudFormation templates. `ip.yml` and `volume.yml` can be run in
   2. Deploy `volume.yml`
   3. Deploy `backup.yml`
   4. Create the following SSM Parameters (plain `String`; the names are themselves parameters of `instance.yml` if you want different ones):
-    - `7days-game-password`: the password players type to join, or the literal `none` for an open server (see [Passwords](#passwords))
+    - `7days-game-password`: the password players type to join, or the literal text `none` for an open server (see [Passwords](#passwords))
     - `7days-admin-password`: the server console password
     - `7days-server-ip-bucket`: An S3 bucket name to upload `7dserver.txt`, containing server IP and port in `0.0.0.0:26900` format.
     - `7days-notify-email`: Email address for server start/stop and player login notifications (see [Email notifications](#email-notifications))

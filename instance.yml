@@ -23,7 +23,10 @@ Parameters:
 
   AMIID:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Description: Latest Ubuntu 24.04 LTS AMI (Canonical public SSM parameter)
+    Description: >-
+      Path of the public SSM parameter that Canonical keeps pointed at the
+      latest Ubuntu 24.04 LTS AMI. This field takes the parameter path, not an
+      AMI id.
     Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
 
   KeyPair:
@@ -32,7 +35,10 @@ Parameters:
 
   S3BucketName:
     Type: AWS::SSM::Parameter::Value<String>
-    Description: S3 bucket name to put IP and port of server
+    Description: >-
+      Name of the SSM parameter that holds the name of the S3 bucket that
+      receives the address file (the server IP and port). This field takes the
+      SSM parameter name, not the bucket name.
     Default: 7days-server-ip-bucket
 
   PortNumber:
@@ -48,30 +54,36 @@ Parameters:
   GamePassword:
     Type: AWS::SSM::Parameter::Value<String>
     Description: >-
-      Name of the SSM parameter holding the password players type to join the
-      server (serverconfig ServerPassword). Kept in SSM, like the admin
-      password, so it is not baked into the template. SSM parameters cannot
-      hold an empty string, so the literal value 'none' means "no join
-      password" - i.e. an open server that anyone who has the address can join.
+      Name of the SSM parameter that holds the password players type to join
+      the server (serverconfig ServerPassword). This field takes the SSM
+      parameter name, not the password: the password stays in SSM, like the
+      admin password, so it is not baked into the template. An SSM parameter
+      cannot hold an empty string, so store the literal text 'none' in that
+      parameter for an open server that anyone who has the address can join.
+      Do not type 'none' here - CloudFormation then looks for an SSM parameter
+      named 'none' and the stack fails.
     Default: 7days-game-password
 
   AdminPassword:
     Type: AWS::SSM::Parameter::Value<String>
     Description: >-
-      Name of the SSM parameter holding the server console password
-      (serverconfig TelnetPassword). This is the operator credential: the idle
-      check, self-heal check, spot drain and login watcher all authenticate to
-      the telnet console with it. Not the same as the player join password.
+      Name of the SSM parameter that holds the server console password
+      (serverconfig TelnetPassword). This field takes the SSM parameter name,
+      not the password. The console password is the operator credential: the
+      idle check, self-heal check, spot drain and login watcher all
+      authenticate to the telnet console with it. It is not the player join
+      password.
     Default: 7days-admin-password
 
   NotifyEmail:
     Type: AWS::SSM::Parameter::Value<String>
     Description: >-
-      Email address that receives a notification when the server becomes
-      joinable, when its host shuts down, and every time a player joins. Read
-      from SSM (like the password) so the address is not baked into the
-      template. SNS sends a one-time confirmation link that must be clicked
-      before any notification is delivered.
+      Name of the SSM parameter that holds the email address that receives a
+      notification when the server becomes joinable, when its host shuts down,
+      and every time a player joins. This field takes the SSM parameter name,
+      not the address: the address stays in SSM, like the passwords, so it is
+      not baked into the template. SNS sends a one-time confirmation link that
+      must be clicked before any notification is delivered.
     Default: 7days-notify-email
 
   WorldGenSeed:
@@ -905,7 +917,8 @@ Resources:
                     /opt/games/7days/serverconfig.xml
 
                   # An SSM parameter cannot hold an empty string, so the literal
-                  # 'none' is how GamePassword asks for an open server. The pattern
+                  # text 'none' in the SSM parameter that GamePassword names is how
+                  # the operator asks for an open server. The pattern
                   # matches the whole rendered line, so no user-supplied text ever
                   # reaches sed as a pattern.
                   sed -i \

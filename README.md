@@ -145,7 +145,7 @@ Give each world its own `ServerName` and `GameName` - two servers left on the de
 
 These land in `serverconfig.xml` as attribute values, so any text must be XML-safe: write `&` as `&amp;` and `<` as `&lt;`, and do not use a double quote.
 
-**Ports come from each record's position in the list, not from the record.** Server *N* (counting from zero) gets game ports `PortNumber + 4N` through `+3`, telnet `TelnetPort + N`, and web dashboard `WebDashboardPort + N`. So the example above listens on 26900-26903, 26904-26907 and 26908-26911. There is nothing to raise as you add servers: the security group opens `PortNumber` to 30000 in one range, wide enough for far more worlds than an instance could run. Setting `ServerPort`, `TelnetPort` or `WebDashboardPort` through a record's `ServerPropertyOverrides` is refused, because it would move that server onto a neighbour's ports behind the allocator's back.
+**Ports come from each record's position in the list, not from the record.** Server *N* (counting from zero) gets game ports `26900 + 4N` through `+3`, telnet `TelnetPort + N`, and web dashboard `WebDashboardPort + N`. So the example above listens on 26900-26903, 26904-26907 and 26908-26911. There is nothing to raise as you add servers: the security group opens a fixed 26900-26999, which is **25 servers** - far more than one instance could run, and the bootstrap refuses a 26th rather than bringing up a world nobody can reach. Setting `ServerPort`, `TelnetPort` or `WebDashboardPort` through a record's `ServerPropertyOverrides` is refused too, because it would move that server onto a neighbour's ports behind the allocator's back.
 
 The one thing to plan for is that **reordering the list re-assigns ports**. Append new servers rather than inserting them, or players' saved entries point at the wrong world.
 
@@ -163,8 +163,7 @@ Every parameter has a working default except `SubnetId`, `VpcId` and `KeyPair`, 
 | `Servers` | `[{"Slug":"main"}]` | JSON list of the worlds this instance hosts, and every per-server setting. See [The `Servers` parameter](#the-servers-parameter). |
 | `GamePassword` | `7days-game-password` | **Name of** the SSM parameter holding the join password, shared by every server. See below. |
 | `AdminPassword` | `7days-admin-password` | **Name of** the SSM parameter holding the console password, shared by every server. See below. |
-| `PortNumber` | `26900` | Game port of the first server; server N gets `PortNumber + 4N`. The security group opens `PortNumber` to 30000 in one range, so nothing here changes as you add servers. |
-| `TelnetPort` / `WebDashboardPort` | `8081` / `8200` | Console and dashboard *base* ports; server N gets base + N. Neither is opened by the security group. |
+| `TelnetPort` / `WebDashboardPort` | `8081` / `8200` | Console and dashboard *base* ports; server N gets base + N. Neither is opened by the security group. The game port range is not a parameter - it is a fixed 26900-26999. |
 | `AutoShutdown` | `enabled` | Whether to scale to zero when every world is empty. |
 | `IdleGraceMinutes` / `IdleCheckMinutes` | `120` / `20` | Idle grace window and how often it is checked. |
 | `HealthCheckMinutes` / `HealthCheckFailureThreshold` | `5` / `3` | Self-heal poll interval, and consecutive failures before a server is restarted (and again before the instance is replaced). |
@@ -236,7 +235,7 @@ Each server's world now lives in its own folder, `/opt/games/userdata/<slug>`, r
 The volume only exists on a running instance, and `cfn-hup` re-runs the bootstrap in place within about five minutes of a stack update - so the order matters. Take a backup first (the S3 archive of the running server, or an EBS snapshot), then:
 
 1. `7days.bat stop`, or wait for the idle shutdown. Updating while the server is up disconnects players mid-session when the old unit is stopped.
-2. Update the stack. Drop `AddressObjectKey` and the per-server parameters from your update command - they no longer exist, and passing one fails the call. Move their values into `Servers` instead.
+2. Update the stack. Drop `AddressObjectKey`, `PortNumber`, `PortNumberTop` and the per-server parameters from your update command - they no longer exist, and passing one fails the call. Move the per-server values into `Servers` instead.
 3. `7days.bat start`. The server comes up on a freshly generated world; do not let anyone join yet.
 4. Open a Session Manager shell and move the save into place:
 
@@ -267,7 +266,7 @@ Deploy all four stacks in the same region; there is no default region baked into
 `volume.yml` creates the volume in `${AWS::Region}a` by default (`AvailabilityZoneSuffix`), and the ASG must launch into that same AZ because a single EBS volume attaches to one instance in one AZ. Pass `instance.yml` a `SubnetId` that lives in that AZ. Confirm your chosen instance type is offered there; if not, deploy `volume.yml` with a different `AvailabilityZoneSuffix` and pick a subnet in the matching AZ.
 
 ## Usage
-Check the S3 bucket for each server's address: `s3://${S3BucketName}/7dserver-<slug>.txt` holds that server's `ip:port` (so a default deployment writes `7dserver-main.txt`). Because the address is a static Elastic IP, it stays the same across every launch, and every server on the host shares it - they differ only by port. Then connect using 7 Days to Die. The first server's game port is UDP/TCP 26900.
+Check the S3 bucket for each server's address: `s3://${S3BucketName}/7dserver-<slug>.txt` holds that server's `ip:port` (so a default deployment writes `7dserver-main.txt`). Because the address is a static Elastic IP, it stays the same across every launch, and every server on the host shares it - they differ only by port. Then connect using 7 Days to Die. The first server is on UDP/TCP 26900, the game's default.
 
 ### Start/Stop Access Control
 If you make an IAM User for people who want to be able to turn on the server on-demand then you can provide them `7days.bat` to enable them to easily turn on and off the server, without them knowing any instance or ASG detail. Starting sets the ASG desired capacity to 1; stopping sets it to 0. This is **host-level**: every world on the instance comes up and goes down together, because the ASG is the only lever. There is no per-world start/stop.

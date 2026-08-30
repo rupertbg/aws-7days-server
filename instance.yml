@@ -41,18 +41,6 @@ Parameters:
       SSM parameter name, not the bucket name.
     Default: 7days-server-ip-bucket
 
-  PortNumber:
-    Type: Number
-    Description: >-
-      Game port of the first server (modern 7DTD default is 26900). Each entry
-      in Servers claims four consecutive ports from here, so server N listens
-      on PortNumber + 4N through +3. The security group opens PortNumber to
-      30000 in one range, which is why there is no top-end parameter to keep in
-      step with the number of servers.
-    Default: 26900
-    MinValue: 1024
-    MaxValue: 29900
-
   GamePassword:
     Type: AWS::SSM::Parameter::Value<String>
     Description: >-
@@ -121,7 +109,9 @@ Parameters:
       ServerPropertyOverrides (empty). These land in serverconfig.xml as
       attribute values, so any text must be XML-safe: write & as &amp; and
       < as &lt;, and do not use a double quote. Ports are allocated from each
-      record's position in the list and cannot be set here. Example:
+      record's position in the list and cannot be set here: server N listens on
+      26900 + 4N, and the security group opens 26900-26999, so an instance
+      holds at most 25 servers. Example:
       [{"Slug":"main"},{"Slug":"pvp","ServerName":"PvP","GameName":"PvPWorld","PlayerKillingMode":"3"}].
       Adding servers means sizing InstanceType for them - see the README.
     Default: '[{"Slug":"main"}]'
@@ -372,27 +362,32 @@ Resources:
       SecurityGroupIngress:
         # Modern 7DTD uses TCP + UDP across ServerPort..ServerPort+3 (the top
         # port covering EOS/crossplay), and each server on this host claims its
-        # own block of four from PortNumber. The range is opened once, wide
-        # enough for far more servers than an instance could run, rather than
-        # made an operator-set ceiling to keep in step with the server count -
-        # a ceiling one server short opens a world nobody can reach. Nothing
-        # else on the instance listens in this range. Open to anywhere over
+        # own block of four from 26900. 26900-26999 is 25 servers, far more
+        # than one instance could run, so the range is a fixed literal rather
+        # than a ceiling the operator keeps in step with the server count - one
+        # short and a world comes up that nobody can reach.
+        #
+        # It is literal rather than derived because CloudFormation has no
+        # arithmetic on parameters: ToPort = PortNumber + 99 cannot be written,
+        # so a movable base costs either a second port parameter or a range too
+        # wide to need one. On a single-purpose host the only sensible base is
+        # the port every 7DTD client already defaults to. Open to anywhere over
         # both IPv4 (0.0.0.0/0) and IPv6 (::/0).
         - CidrIp: 0.0.0.0/0
-          FromPort: !Ref PortNumber
-          ToPort: 30000
+          FromPort: 26900
+          ToPort: 26999
           IpProtocol: udp
         - CidrIpv6: ::/0
-          FromPort: !Ref PortNumber
-          ToPort: 30000
+          FromPort: 26900
+          ToPort: 26999
           IpProtocol: udp
         - CidrIp: 0.0.0.0/0
-          FromPort: !Ref PortNumber
-          ToPort: 30000
+          FromPort: 26900
+          ToPort: 26999
           IpProtocol: tcp
         - CidrIpv6: ::/0
-          FromPort: !Ref PortNumber
-          ToPort: 30000
+          FromPort: 26900
+          ToPort: 26999
           IpProtocol: tcp
 
   LaunchTemplate:
@@ -790,13 +785,12 @@ Resources:
                   # Ports come from the record's index, not from the record, so
                   # they cannot be set into a collision by hand: 7DTD claims
                   # ServerPort..ServerPort+3, so each world takes a block of 4 from
-                  # PortNumber, and one port each from the telnet and dashboard
-                  # bases. The security group opens PortNumber..30000 in one
-                  # fixed range, so this only has to catch a PortNumber set so
-                  # high that a later server would run off the end - a world
-                  # whose ports the group does not open would appear in the
-                  # browser and refuse every connection, which is worse than
-                  # not booting.
+                  # 26900, and one port each from the telnet and dashboard
+                  # bases. The security group opens a fixed 26900-26999, so
+                  # this is the check on how many servers fit - a world whose
+                  # ports the group does not open would appear in the browser
+                  # and refuse every connection, which is worse than not
+                  # booting.
                   : > /run/7dtd-manifest
                   i=0
                   while [ "$i" -lt "$SERVER_COUNT" ]; do
@@ -807,11 +801,11 @@ Resources:
                       echo "ERROR: Servers[$i].Slug '$slug' must be 1-32 characters of [A-Za-z0-9_-] starting with a letter or digit" >&2
                       exit 1
                     fi
-                    game_port=$(( ${PortNumber} + i * 4 ))
+                    game_port=$(( 26900 + i * 4 ))
                     telnet_port=$(( ${TelnetPort} + i ))
                     dash_port=$(( ${WebDashboardPort} + i ))
-                    if [ "$(( game_port + 3 ))" -gt 30000 ]; then
-                      echo "ERROR: server '$slug' needs game ports $game_port-$(( game_port + 3 )), past the 30000 top of the range the security group opens. Lower PortNumber (currently ${PortNumber}) or run fewer servers." >&2
+                    if [ "$(( game_port + 3 ))" -gt 26999 ]; then
+                      echo "ERROR: server '$slug' needs game ports $game_port-$(( game_port + 3 )), past the 26999 top of the range the security group opens. One instance holds at most 25 servers." >&2
                       exit 1
                     fi
                     printf '%s %s %s %s %s\n' "$i" "$slug" "$game_port" "$telnet_port" "$dash_port" >> /run/7dtd-manifest
@@ -992,7 +986,7 @@ Resources:
                       # can see, because they run before this.
                       case "$ov_name" in
                         ServerPort|TelnetPort|WebDashboardPort)
-                          echo "ERROR: server '$slug' sets $ov_name through ServerPropertyOverrides. Ports are allocated from the server's position in the Servers list; change PortNumber, TelnetPort or WebDashboardPort instead." >&2
+                          echo "ERROR: server '$slug' sets $ov_name through ServerPropertyOverrides. Ports are allocated from the server's position in the Servers list and cannot be set per server." >&2
                           exit 1
                           ;;
                       esac

@@ -34,7 +34,6 @@ PARAMS = {
     'IdleCheckMinutes': '20',
     'IdleGraceMinutes': '120',
     'NotifyTopic': 'arn:aws:sns:us-east-1:111111111111:topic',
-    'PortNumber': '26900',
     'S3BucketName': 'test-bucket',
     'Servers': '[{"Slug":"main"}]',
     'TelnetPort': '8081',

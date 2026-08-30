@@ -82,6 +82,14 @@ has dash/etc/7dtd/quiet/serverconfig.xml '<property name="WebDashboardEnabled" v
 has dash/etc/7dtd/quiet/serverconfig.xml '<property name="ServerVisibility" value="0"/>' "and hide itself from the browser"
 has dash/etc/7dtd/quiet/serverconfig.xml '<property name="ServerMaxPlayerCount" value="4"/>' "and set its own player cap"
 
+run explicitempty '[{"Slug":"bare","ServerDescription":"","ServerWebsiteURL":"","AdminSteamIds":""}]'
+ok "$?" 0 "bootstrap succeeds"
+has explicitempty/etc/7dtd/bare/serverconfig.xml '<property name="ServerDescription" value=""/>' "an explicit empty value is kept, not filled in by the default"
+ok "$(count explicitempty/opt/games/userdata/bare/Saves/serveradmin.xml '<user ')" "0" "and an explicitly empty admin list stays empty"
+run nulled '[{"Slug":"bare","ServerDescription":null}]'
+ok "$?" 0 "bootstrap succeeds"
+has nulled/etc/7dtd/bare/serverconfig.xml '<property name="ServerDescription" value="A 7 Days to Die server, running on AWS"/>' "but a null field falls back to the default"
+
 echo "per-server property overrides"
 run overrides '[{"Slug":"lite","ServerPropertyOverrides":"MaxSpawnedZombies=16,LandClaimSize=71,SomeNewProperty=yes"}]'
 ok "$?" 0 "bootstrap succeeds"

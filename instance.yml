@@ -769,16 +769,24 @@ Resources:
                     esac
                   }
                   # srv_get <index> <field>: that server's value, or the default.
-                  # jq's // treats only null and false as absent, so a numeric 0
-                  # (AdminPermissionLevel, PlayerKillingMode) is kept, not replaced.
-                  # Always newline-terminated: the callers that redirect this to
-                  # a file feed it to `read`, which silently drops a trailing
-                  # line that has no newline - and that line is the last Steam id
-                  # or the last property override.
+                  # Presence is tested rather than truthiness, so a record can
+                  # set a field to "" and mean it - clearing a description the
+                  # default would otherwise fill in - and a numeric 0
+                  # (AdminPermissionLevel, PlayerKillingMode) is kept rather
+                  # than read as absent. A field present but null counts as
+                  # unset. jq -r newline-terminates its output and srv_default
+                  # echoes, so both branches end in a newline: the callers that
+                  # redirect this to a file feed it to `read`, which silently
+                  # drops a trailing line that has none - and that line is the
+                  # last Steam id or the last property override.
                   srv_get() {
-                    local v
-                    v=$(jq -r --argjson i "$1" --arg f "$2" '.[$i][$f] // empty' /run/7dtd-servers.json)
-                    if [ -n "$v" ]; then printf '%s\n' "$v"; else srv_default "$2"; fi
+                    if jq -e --argjson i "$1" --arg f "$2" \
+                         '(.[$i] | has($f)) and (.[$i][$f] != null)' \
+                         /run/7dtd-servers.json >/dev/null; then
+                      jq -r --argjson i "$1" --arg f "$2" '.[$i][$f]' /run/7dtd-servers.json
+                    else
+                      srv_default "$2"
+                    fi
                   }
 
                   # --- Port allocation ------------------------------------------

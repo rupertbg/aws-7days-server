@@ -98,8 +98,12 @@ Parameters:
       outside this one are host-level. Only "Slug" is required (1-32 characters
       of A-Za-z0-9_- starting alphanumeric): it names the save folder, the
       systemd unit, the S3 address object and the backup prefix, so keep it
-      stable - changing it starts a new world. Optional fields, with the value
-      used when omitted: ServerName (7 Days to Die on AWS), ServerDescription,
+      stable - changing it starts a new world. Set Enabled to false to pause a
+      world: it keeps its slot in the list, so no server after it has its ports
+      moved, its config and save folder are kept, and it is simply not started
+      and not supervised until you set it back. Optional fields, with the value
+      used when omitted: Enabled (true), ServerName (7 Days to Die on AWS),
+      ServerDescription,
       ServerWebsiteURL (empty), ServerVisibility (2), ServerMaxPlayerCount (16),
       ServerReservedSlots (2), ServerReservedSlotsPermission (100), GameWorld
       (RWG), GameName (SevenDaysOnAws), WorldGenSeed (SevenDaysOnAws),
@@ -752,6 +756,7 @@ Resources:
                       PlayerKillingMode)             echo 2 ;;
                       AdminPermissionLevel)          echo 0 ;;
                       WebDashboardEnabled)           echo true ;;
+                      Enabled)                       echo true ;;
                       # ServerWebsiteURL, AdminSteamIds and
                       # ServerPropertyOverrides all default to nothing - in
                       # particular an empty admin list means a fresh deployment
@@ -803,6 +808,21 @@ Resources:
                       echo "ERROR: Servers[$i].Slug '$slug' must be 1-32 characters of [A-Za-z0-9_-] starting with a letter or digit" >&2
                       exit 1
                     fi
+                    # Enabled defaults to true. A record can be paused without
+                    # being removed, which keeps its slot in the list so no
+                    # server after it has its ports shifted. A value that is
+                    # neither true nor false is refused rather than read as
+                    # enabled: a typo quietly meaning "running" is how a world
+                    # nobody is watching stays down.
+                    enabled=$(srv_get "$i" Enabled)
+                    case "$enabled" in
+                      true|True|TRUE|yes|Yes|YES|1|enabled)   enabled=true ;;
+                      false|False|FALSE|no|No|NO|0|disabled)  enabled=false ;;
+                      *)
+                        echo "ERROR: Servers[$i].Slug '$slug' has Enabled='$enabled'; it must be true or false" >&2
+                        exit 1
+                        ;;
+                    esac
                     game_port=$(( 26900 + i * 4 ))
                     telnet_port=$(( ${AdminPortBase} + i * 2 ))
                     dash_port=$(( telnet_port + 1 ))
@@ -819,7 +839,7 @@ Resources:
                       echo "ERROR: server '$slug' needs console/dashboard ports $telnet_port/$dash_port, inside the 26900-26999 game range the security group opens to the internet. Move AdminPortBase (currently ${AdminPortBase}) clear of it." >&2
                       exit 1
                     fi
-                    printf '%s %s %s %s %s\n' "$i" "$slug" "$game_port" "$telnet_port" "$dash_port" >> /run/7dtd-manifest
+                    printf '%s %s %s %s %s %s\n' "$i" "$slug" "$game_port" "$telnet_port" "$dash_port" "$enabled" >> /run/7dtd-manifest
                     i=$(( i + 1 ))
                   done
                   dupe_slugs=$(awk '{print $2}' /run/7dtd-manifest | sort | uniq -d)
@@ -844,7 +864,16 @@ Resources:
                     echo "This should not be reachable: game blocks and console/dashboard pairs are allocated from disjoint ranges. Report it." >&2
                     exit 1
                   fi
-                  awk '{print $2}' /run/7dtd-manifest > /etc/7dtd/servers
+                  # Two lists, because "configured" and "running" are no longer
+                  # the same set. Every supervision script iterates
+                  # /etc/7dtd/servers, so a paused world drops out of the idle,
+                  # health, refresh, drain and backup loops for free - which it
+                  # must, since its console will never answer and the idle and
+                  # refresh checks treat an unreadable console as a reason to do
+                  # nothing at all. servers.all keeps the full allocation so the
+                  # orphan sweep can tell a paused world from a removed one.
+                  awk '$6 == "true" {print $2}' /run/7dtd-manifest > /etc/7dtd/servers
+                  awk '{print $2}' /run/7dtd-manifest > /etc/7dtd/servers.all
 
                   # --- Per-server config, save folder and console credentials ----
                   # xtrace is off for this whole section: it would print the game
@@ -893,13 +922,20 @@ Resources:
                     fi
                   }
 
-                  while read -r idx slug game_port telnet_port dash_port; do
+                  while read -r idx slug game_port telnet_port dash_port enabled; do
                     SLUG=$slug
                     SRV_DIR=/etc/7dtd/$slug
                     CFG=$SRV_DIR/serverconfig.xml
                     USERDATA=/opt/games/userdata/$slug
                     srv_name=$(srv_get "$idx" ServerName)
-                    echo "configuring server '$slug' ($srv_name) on game $game_port, telnet $telnet_port, dashboard $dash_port" >&2
+                    if [ "$enabled" = true ]; then
+                      echo "configuring server '$slug' ($srv_name) on game $game_port, telnet $telnet_port, dashboard $dash_port" >&2
+                    else
+                      # Still configured, just not started: the config and the
+                      # save folder are written so re-enabling resumes the same
+                      # world rather than generating a new one.
+                      echo "configuring server '$slug' ($srv_name) as PAUSED; it holds game $game_port but will not be started" >&2
+                    fi
                     install -d -m 0755 "$SRV_DIR"
                     # The game creates Saves/ itself, but serveradmin.xml has to be
                     # in place before the first launch.
@@ -1063,6 +1099,7 @@ Resources:
                       printf 'USERDATA=%s\n' "$USERDATA"
                       printf 'CONFIG=%s\n' "$CFG"
                       printf 'SERVER_NAME=%q\n' "$srv_name"
+                      printf 'ENABLED=%s\n' "$enabled"
                     } > "$SRV_DIR/server.env"
                     chmod 0644 "$SRV_DIR/server.env"
                   done < /run/7dtd-manifest
@@ -1080,7 +1117,9 @@ Resources:
                   for d in /etc/7dtd/*/; do
                     [ -d "$d" ] || continue
                     old=$(basename "$d")
-                    grep -qx "$old" /etc/7dtd/servers && continue
+                    # servers.all, not servers: a paused world is still
+                    # configured and keeps everything, it just is not started.
+                    grep -qx "$old" /etc/7dtd/servers.all && continue
                     echo "server '$old' is no longer in the Servers parameter; stopping its units" >&2
                     systemctl disable --now "7dtd@$old.service" 2>/dev/null || true
                     systemctl disable --now "7dtd-login-notify@$old.service" 2>/dev/null || true
@@ -1713,6 +1752,16 @@ Resources:
                     # edited watcher script instead of leaving the old one connected.
                     systemctl enable "7dtd-login-notify@$slug.service"
                     systemctl restart "7dtd-login-notify@$slug.service"
+                  done
+                  # Paused worlds: allocated and configured, but stopped. Disabled
+                  # as well as stopped so a reboot does not bring them back, and
+                  # done on every run so pausing a world takes effect on a running
+                  # host through cfn-hup rather than waiting for a relaunch.
+                  for slug in $(cat /etc/7dtd/servers.all); do
+                    grep -qx "$slug" /etc/7dtd/servers && continue
+                    echo "server '$slug' is paused (Enabled=false); stopping its units" >&2
+                    systemctl disable --now "7dtd@$slug.service" 2>/dev/null || true
+                    systemctl disable --now "7dtd-login-notify@$slug.service" 2>/dev/null || true
                   done
                   # Idle auto-shutdown is toggled by the AutoShutdown parameter.
                   # cfn-hup re-runs this on a parameter change, so flipping it to

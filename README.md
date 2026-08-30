@@ -125,6 +125,7 @@ As of 7 Days to Die V3.0, gameplay settings (difficulty, zombie speed, loot, blo
 | Field | Used when omitted | What it does |
 | --- | --- | --- |
 | `Slug` | *required* | Identity of this server on the host and in S3. |
+| `Enabled` | `true` | Set `false` to pause this world. See [Pausing a world](#pausing-a-world). |
 | `ServerName` | `7 Days to Die on AWS` | Name in the server browser. |
 | `ServerDescription` | generic | Description in the server browser. |
 | `ServerWebsiteURL` | empty | Website link in the server browser. |
@@ -151,7 +152,16 @@ There is nothing to keep in step as you add servers. The security group opens a 
 
 The one thing to plan for is that **reordering the list re-assigns ports**. Append new servers rather than inserting them, or players' saved entries point at the wrong world.
 
-Removing a record stops that server's units on the next launch (or within the cfn-hup poll interval) and deletes its generated config. **Its save data is left on the volume**, so putting the record back with the same slug resumes the same world.
+Removing a record stops that server's units on the next launch (or within the cfn-hup poll interval) and deletes its generated config. **Its save data is left on the volume**, so putting the record back with the same slug resumes the same world. To take a world offline without removing it, see below.
+
+### Pausing a world
+Set `"Enabled": "false"` on a record. It keeps its place in the list, so its port slot is held and no server after it has its ports shifted. Its `serverconfig.xml` and save folder are still written and kept, so setting it back to `true` resumes the same world rather than generating a new one.
+
+A paused world is also dropped from supervision, which is the part that matters. The idle check, self-heal check, daily refresh, spot drain and backup all iterate the *running* set, so a world that will never answer its console does not stall them. This is why pausing needs a field rather than a `systemctl stop`: a hand-stopped server keeps its slug in the running set, and both the idle check and the daily refresh treat an unreadable console as a reason to do nothing at all - so one stopped world silently switches off host idle-shutdown and daily replacement for every other world too. A `systemctl stop` is also undone by the next launch or cfn-hup poll, which re-enables and starts it.
+
+Pausing takes effect on a running host within the cfn-hup poll interval, and does not touch the other worlds. Two things to know: the paused world's `7dserver-<slug>.txt` in S3 is left as it was rather than removed, so it will advertise an address nothing is listening on; and it stops being backed up, so its last archive is from when it was running.
+
+Values accepted are the usual spellings - `true`/`false`, `yes`/`no`, `1`/`0`, `enabled`/`disabled`. Anything else is refused at boot rather than read as enabled, because a typo quietly meaning "running" is how a world nobody is watching stays down.
 
 Everything that supervises the host is per-host, not per-server: `7days.bat` starts and stops all of them together, and idle shutdown fires only when *every* world is empty. See [Idle Shutdown](#idle-shutdown).
 

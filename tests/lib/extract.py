@@ -79,10 +79,12 @@ def resolve(script):
     return out
 
 
-def section(script, start_marker, end_marker):
+def section(script, start_marker, end_marker, last_start=False):
     lines = script.split('\n')
-    a = next(i for i, l in enumerate(lines) if l.startswith(start_marker))
-    b = next(i for i, l in enumerate(lines) if l.startswith(end_marker))
+    starts = [i for i, l in enumerate(lines) if l.startswith(start_marker)]
+    a = starts[-1] if last_start else starts[0]
+    b = next(i for i in range(a + 1, len(lines))
+             if lines[i].startswith(end_marker))
     return '\n'.join(lines[a:b])
 
 
@@ -151,7 +153,14 @@ def main():
             .replace('cat > $ROOT/run/7dtd-servers.json <<\'SERVERSJSON\'\n'
                      '[{"Slug":"main"}]\nSERVERSJSON',
                      'printf \'%s\\n\' "$SERVERS_JSON" > $ROOT/run/7dtd-servers.json'))
-    open(os.path.join(build, 'server-set.sh'), 'w').write(PREAMBLE + body + '\n')
+    # The unit loop lives several hundred lines later, past the script and
+    # unit-file heredocs the tests do not exercise. Appending it lets a suite
+    # assert what actually starts, pauses and stops - the systemctl stub in the
+    # preamble turns each call into a log line.
+    units = sandbox(section(script, 'systemctl daemon-reload',
+                            '# Idle auto-shutdown is toggled', last_start=True))
+    open(os.path.join(build, 'server-set.sh'), 'w').write(
+        PREAMBLE + body + '\n' + units + '\n')
 
     for name in SUPERVISION:
         text = sandbox(embedded(script, name)).replace(

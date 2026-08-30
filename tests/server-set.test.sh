@@ -101,6 +101,31 @@ run nulled '[{"Slug":"bare","ServerDescription":null}]'
 ok "$?" 0 "bootstrap succeeds"
 has nulled/etc/7dtd/bare/serverconfig.xml '<property name="ServerDescription" value="A 7 Days to Die server, running on AWS"/>' "but a null field falls back to the default"
 
+echo "pausing a world"
+run paused '[{"Slug":"a"},{"Slug":"b","Enabled":"false"},{"Slug":"c"}]'
+ok "$?" 0 "bootstrap succeeds"
+ok "$(tr '\n' ' ' < "$WORK/paused/etc/7dtd/servers")" "a c " "the paused world is not in the running set"
+ok "$(tr '\n' ' ' < "$WORK/paused/etc/7dtd/servers.all")" "a b c " "but is still in the allocation"
+has paused/etc/7dtd/b/serverconfig.xml '<property name="ServerPort" value="26904"/>' "it keeps its own port slot"
+has paused/etc/7dtd/c/serverconfig.xml '<property name="ServerPort" value="26908"/>' "so the world after it does not move"
+exists paused/opt/games/userdata/b/Saves/serveradmin.xml "its save folder is still set up"
+has paused.log "server 'b' is paused (Enabled=false); stopping its units" "its units are stopped"
+has paused.log "STUB systemctl disable --now 7dtd@b.service" "and disabled so a reboot leaves it down"
+has paused.log "as PAUSED; it holds game 26904" "and the launch log says so"
+lacks paused.log "STUB systemctl enable --now 7dtd@b.service" "it is never started"
+has paused.log "STUB systemctl enable --now 7dtd@a.service" "while the others start normally"
+
+run resumed '[{"Slug":"a"},{"Slug":"b"},{"Slug":"c"}]'
+ok "$?" 0 "re-enabling succeeds"
+ok "$(tr '\n' ' ' < "$WORK/resumed/etc/7dtd/servers")" "a b c " "and it rejoins the running set"
+
+run truthy '[{"Slug":"a","Enabled":"no"},{"Slug":"b","Enabled":"1"}]'
+ok "$?" 0 "the usual spellings are accepted"
+ok "$(cat "$WORK/truthy/etc/7dtd/servers")" "b" "no is off and 1 is on"
+run badenabled '[{"Slug":"a","Enabled":"maybe"}]'
+ok "$?" 1 "an unrecognised value is refused, not read as enabled"
+has badenabled.log "must be true or false" "and the rule is stated"
+
 echo "per-server property overrides"
 run overrides '[{"Slug":"lite","ServerPropertyOverrides":"MaxSpawnedZombies=16,LandClaimSize=71,SomeNewProperty=yes"}]'
 ok "$?" 0 "bootstrap succeeds"

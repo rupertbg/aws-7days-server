@@ -145,7 +145,9 @@ Give each world its own `ServerName` and `GameName` - two servers left on the de
 
 These land in `serverconfig.xml` as attribute values, so any text must be XML-safe: write `&` as `&amp;` and `<` as `&lt;`, and do not use a double quote.
 
-**Ports come from each record's position in the list, not from the record.** Server *N* (counting from zero) gets game ports `26900 + 4N` through `+3`, telnet `TelnetPort + N`, and web dashboard `WebDashboardPort + N`. So the example above listens on 26900-26903, 26904-26907 and 26908-26911. There is nothing to raise as you add servers: the security group opens a fixed 26900-26999, which is **25 servers** - far more than one instance could run, and the bootstrap refuses a 26th rather than bringing up a world nobody can reach. Setting `ServerPort`, `TelnetPort` or `WebDashboardPort` through a record's `ServerPropertyOverrides` is refused too, because it would move that server onto a neighbour's ports behind the allocator's back.
+**Ports come from each record's position in the list, not from the record.** Server *N* (counting from zero) gets game ports `26900 + 4N` through `+3`, its telnet console on `AdminPortBase + 2N`, and its web dashboard on the port after that. So the example above listens on 26900-26903, 26904-26907 and 26908-26911, with consoles on 8081, 8083 and 8085.
+
+There is nothing to keep in step as you add servers. The security group opens a fixed 26900-26999, which is **25 servers** - far more than one instance could run - and the bootstrap refuses a 26th rather than bringing up a world nobody can reach. The console and dashboard come off a single base with a stride of two, so they cannot grow into each other however many worlds you add; that was two separate bases once, and two bases set close together produced a deployment that refused to start on its second server. Setting `ServerPort`, `TelnetPort` or `WebDashboardPort` through a record's `ServerPropertyOverrides` is refused too, because it would move that server onto a neighbour's ports behind the allocator's back.
 
 The one thing to plan for is that **reordering the list re-assigns ports**. Append new servers rather than inserting them, or players' saved entries point at the wrong world.
 
@@ -163,7 +165,7 @@ Every parameter has a working default except `SubnetId`, `VpcId` and `KeyPair`, 
 | `Servers` | `[{"Slug":"main"}]` | JSON list of the worlds this instance hosts, and every per-server setting. See [The `Servers` parameter](#the-servers-parameter). |
 | `GamePassword` | `7days-game-password` | **Name of** the SSM parameter holding the join password, shared by every server. See below. |
 | `AdminPassword` | `7days-admin-password` | **Name of** the SSM parameter holding the console password, shared by every server. See below. |
-| `TelnetPort` / `WebDashboardPort` | `8081` / `8200` | Console and dashboard *base* ports; server N gets base + N. Neither is opened by the security group. The game port range is not a parameter - it is a fixed 26900-26999. |
+| `AdminPortBase` | `8081` | Base for each server's two localhost ports: server N gets its telnet console on `AdminPortBase + 2N` and its web dashboard on the port after. Neither is opened by the security group. The game port range is not a parameter - it is a fixed 26900-26999. |
 | `AutoShutdown` | `enabled` | Whether to scale to zero when every world is empty. |
 | `IdleGraceMinutes` / `IdleCheckMinutes` | `120` / `20` | Idle grace window and how often it is checked. |
 | `HealthCheckMinutes` / `HealthCheckFailureThreshold` | `5` / `3` | Self-heal poll interval, and consecutive failures before a server is restarted (and again before the instance is replaced). |
@@ -235,7 +237,7 @@ Each server's world now lives in its own folder, `/opt/games/userdata/<slug>`, r
 The volume only exists on a running instance, and `cfn-hup` re-runs the bootstrap in place within about five minutes of a stack update - so the order matters. Take a backup first (the S3 archive of the running server, or an EBS snapshot), then:
 
 1. `7days.bat stop`, or wait for the idle shutdown. Updating while the server is up disconnects players mid-session when the old unit is stopped.
-2. Update the stack. Drop `AddressObjectKey`, `PortNumber`, `PortNumberTop` and the per-server parameters from your update command - they no longer exist, and passing one fails the call. Move the per-server values into `Servers` instead.
+2. Update the stack. Drop `AddressObjectKey`, `PortNumber`, `PortNumberTop`, `TelnetPort`, `WebDashboardPort` and the per-server parameters - they no longer exist, and passing one fails the call. Move the per-server values into `Servers` instead. Note that the CloudFormation console pre-fills a stack's existing parameter values, so a parameter you have set explicitly keeps its old value rather than picking up a new template default.
 3. `7days.bat start`. The server comes up on a freshly generated world; do not let anyone join yet.
 4. Open a Session Manager shell and move the save into place. **The server must be stopped before the `mv`.** A running server holds the freshly generated world in memory and its next autosave writes that over whatever you just moved in - `vehicles.dat` and `power.dat` first, so your vehicles and everything inside your generators and battery banks disappear while the terrain and your base survive and make it look like the move worked. The guard below refuses to continue rather than let that happen:
 
@@ -254,7 +256,7 @@ If you do hit it, the save is recoverable: the last S3 archive from before the m
 
 Keep the `GameName` you deployed with (`SevenDaysOnAws` unless you changed it), because the save lives at `Saves/<GameWorld>/<GameName>/` and a new name means a new world even after the folders move.
 
-Two smaller changes: the address object is renamed from `7dserver.txt` to `7dserver-<slug>.txt`, so anything reading it needs the new key; and `WebDashboardPort` now defaults to 8200 rather than 8080, which CloudFormation applies to any parameter you do not pass explicitly. Pre-templated systemd units (`7dtd.service`, `7dtd-login-notify.service`) are stopped and removed by the bootstrap itself, so a stack update does not leave one holding the game port.
+Two smaller changes: the address object is renamed from `7dserver.txt` to `7dserver-<slug>.txt`, so anything reading it needs the new key; and `TelnetPort`/`WebDashboardPort` are replaced by a single `AdminPortBase`, so your first server keeps console 8081 but its dashboard moves to 8082. Pre-templated systemd units (`7dtd.service`, `7dtd-login-notify.service`) are stopped and removed by the bootstrap itself, so a stack update does not leave one holding the game port.
 
 ## Backups
 `backup.yml` provides two independent layers of protection for the world saves, both retained for 14 days by default (`RetentionDays`):

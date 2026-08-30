@@ -118,30 +118,21 @@ Parameters:
     MinLength: 1
 
   # --- Console and web dashboard ---------------------------------------------
-  # Allocation bases, not values written into a config: server N gets base + N.
-  # Neither port is opened by the security group.
 
-  TelnetPort:
+  AdminPortBase:
     Type: Number
     Description: >-
-      Base port for the telnet console, on localhost only - it is deliberately
-      not opened in the security group. Server N gets TelnetPort + N. The idle,
-      health, drain and login-watcher scripts all talk to each server through
-      its own console port.
+      Base for the two localhost ports each server needs: server N gets the
+      telnet console on AdminPortBase + 2N and the web dashboard on
+      AdminPortBase + 2N + 1. One base with a stride of two rather than a base
+      each, so consoles and dashboards cannot grow into one another however
+      many servers are added. Neither port is opened by the security group -
+      reaching a dashboard means tunnelling in - and the idle, health, drain
+      and login-watcher scripts all talk to each server through its own console
+      port. The default puts server 0's console on 8081.
     Default: 8081
-    MinValue: 1
-    MaxValue: 65535
-
-  WebDashboardPort:
-    Type: Number
-    Description: >-
-      Base port for the game's web dashboard. Server N gets
-      WebDashboardPort + N. The default sits well clear of TelnetPort so the
-      two ranges cannot grow into each other; the bootstrap refuses to start if
-      they ever do.
-    Default: 8200
-    MinValue: 1
-    MaxValue: 65535
+    MinValue: 1024
+    MaxValue: 65000
 
   # --- Operational timings ---------------------------------------------------
 
@@ -793,9 +784,12 @@ Resources:
                   # Ports come from the record's index, not from the record, so
                   # they cannot be set into a collision by hand: 7DTD claims
                   # ServerPort..ServerPort+3, so each world takes a block of 4 from
-                  # 26900, and one port each from the telnet and dashboard
-                  # bases. The security group opens a fixed 26900-26999, so
-                  # this is the check on how many servers fit - a world whose
+                  # 26900, and a console/dashboard pair from AdminPortBase.
+                  # The pair is a stride of two off one base rather than one
+                  # port off each of two bases, so consoles and dashboards
+                  # cannot meet no matter how many servers there are. The
+                  # security group opens a fixed 26900-26999, so the game check
+                  # below is the limit on how many servers fit - a world whose
                   # ports the group does not open would appear in the browser
                   # and refuse every connection, which is worse than not
                   # booting.
@@ -810,10 +804,19 @@ Resources:
                       exit 1
                     fi
                     game_port=$(( 26900 + i * 4 ))
-                    telnet_port=$(( ${TelnetPort} + i ))
-                    dash_port=$(( ${WebDashboardPort} + i ))
+                    telnet_port=$(( ${AdminPortBase} + i * 2 ))
+                    dash_port=$(( telnet_port + 1 ))
                     if [ "$(( game_port + 3 ))" -gt 26999 ]; then
                       echo "ERROR: server '$slug' needs game ports $game_port-$(( game_port + 3 )), past the 26999 top of the range the security group opens. One instance holds at most 25 servers." >&2
+                      exit 1
+                    fi
+                    # The admin pair cannot collide with another server's pair
+                    # by construction, and AdminPortBase's MaxValue of 65000
+                    # plus the 25-server cap keeps the highest pair at 65049, so
+                    # running off the end of the port space is not reachable
+                    # either. Landing on the game window is all that is left.
+                    if [ "$dash_port" -ge 26900 ] && [ "$telnet_port" -le 26999 ]; then
+                      echo "ERROR: server '$slug' needs console/dashboard ports $telnet_port/$dash_port, inside the 26900-26999 game range the security group opens to the internet. Move AdminPortBase (currently ${AdminPortBase}) clear of it." >&2
                       exit 1
                     fi
                     printf '%s %s %s %s %s\n' "$i" "$slug" "$game_port" "$telnet_port" "$dash_port" >> /run/7dtd-manifest
@@ -824,9 +827,10 @@ Resources:
                     echo "ERROR: duplicate Slug in the Servers parameter: $dupe_slugs" >&2
                     exit 1
                   fi
-                  # Every port this host will bind, game blocks included. Catches a
-                  # TelnetPort or WebDashboardPort base that the growing ranges walk
-                  # into as servers are added.
+                  # Every port this host will bind, game blocks included. An
+                  # invariant check rather than a user-error check now that the
+                  # allocator cannot produce a collision: if this ever fires,
+                  # the allocation logic above is wrong.
                   dupe_ports=$(awk '{print $3; print $3+1; print $3+2; print $3+3; print $4; print $5}' /run/7dtd-manifest | sort -n | uniq -d)
                   if [ -n "$dupe_ports" ]; then
                     # Print the whole allocation, not just the offending number:
@@ -837,7 +841,7 @@ Resources:
                     while read -r _idx m_slug m_game m_telnet m_dash; do
                       echo "  $m_slug: game $m_game-$(( m_game + 3 )), telnet $m_telnet, dashboard $m_dash" >&2
                     done < /run/7dtd-manifest
-                    echo "TelnetPort and WebDashboardPort are bases - server N gets base + N - so they must be far enough apart that their ranges cannot meet. The defaults, ${TelnetPort} and ${WebDashboardPort}, leave room for $(( ${WebDashboardPort} - ${TelnetPort} )) servers." >&2
+                    echo "This should not be reachable: game blocks and console/dashboard pairs are allocated from disjoint ranges. Report it." >&2
                     exit 1
                   fi
                   awk '{print $2}' /run/7dtd-manifest > /etc/7dtd/servers
@@ -1002,7 +1006,7 @@ Resources:
                       # can see, because they run before this.
                       case "$ov_name" in
                         ServerPort|TelnetPort|WebDashboardPort)
-                          echo "ERROR: server '$slug' sets $ov_name through ServerPropertyOverrides. Ports are allocated from the server's position in the Servers list and cannot be set per server." >&2
+                          echo "ERROR: server '$slug' sets $ov_name through ServerPropertyOverrides. Ports are allocated from the server's position in the Servers list and cannot be set per server; change AdminPortBase if you need the console and dashboard elsewhere." >&2
                           exit 1
                           ;;
                       esac

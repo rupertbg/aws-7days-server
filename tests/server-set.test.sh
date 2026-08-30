@@ -8,7 +8,7 @@ HARNESS=build/server-set.sh
 WORK=build/work
 pass=0; fail=0
 
-run() { # run <case> <servers-json> [telnetbase] [dashbase]
+run() { # run <case> <servers-json> [adminbase]
   local case=$1; shift
   rm -rf "$WORK/$case"; mkdir -p "$WORK/$case"
   bash "$HARNESS" "$WORK/$case" "$@" > "$WORK/$case.log" 2>&1
@@ -33,7 +33,7 @@ ok "$(tail -1 "$WORK/one/etc/7dtd/main/serverconfig.xml")" '</ServerSettings>' "
 ok "$(stat -f %Lp "$WORK/one/etc/7dtd/main/serverconfig.xml" 2>/dev/null || stat -c %a "$WORK/one/etc/7dtd/main/serverconfig.xml")" "640" "config is not world-readable"
 has one/etc/7dtd/main/serverconfig.xml '<property name="ServerPort" value="26900"/>' "game port"
 has one/etc/7dtd/main/serverconfig.xml '<property name="TelnetPort" value="8081"/>' "telnet port"
-has one/etc/7dtd/main/serverconfig.xml '<property name="WebDashboardPort" value="8200"/>' "dashboard port"
+has one/etc/7dtd/main/serverconfig.xml '<property name="WebDashboardPort" value="8082"/>' "dashboard port is the console port + 1"
 has one/etc/7dtd/main/serverconfig.xml '<property name="ServerIP" value="203.0.113.10"/>' "elastic ip"
 has one/etc/7dtd/main/serverconfig.xml '<property name="GameWorld" value="RWG"/>' "world inherited"
 has one/etc/7dtd/main/server.env 'GAME_PORT=26900' "env carries the game port"
@@ -46,8 +46,10 @@ ok "$?" 0 "bootstrap succeeds"
 ok "$(tr '\n' ' ' < "$WORK/three/etc/7dtd/servers")" "main pvp creative " "list keeps parameter order"
 has three/etc/7dtd/pvp/serverconfig.xml '<property name="ServerPort" value="26904"/>' "second game port is +4"
 has three/etc/7dtd/creative/serverconfig.xml '<property name="ServerPort" value="26908"/>' "third game port is +8"
-has three/etc/7dtd/pvp/serverconfig.xml '<property name="TelnetPort" value="8082"/>' "second console port is +1"
-has three/etc/7dtd/creative/serverconfig.xml '<property name="WebDashboardPort" value="8202"/>' "third dashboard port is +2"
+has three/etc/7dtd/pvp/serverconfig.xml '<property name="TelnetPort" value="8083"/>' "second console port is +2"
+has three/etc/7dtd/pvp/serverconfig.xml '<property name="WebDashboardPort" value="8084"/>' "and its dashboard follows it"
+has three/etc/7dtd/creative/serverconfig.xml '<property name="TelnetPort" value="8085"/>' "third console port is +4"
+has three/etc/7dtd/creative/serverconfig.xml '<property name="WebDashboardPort" value="8086"/>' "and its dashboard follows too"
 has three/etc/7dtd/pvp/serverconfig.xml '<property name="ServerName" value="PvP Realm"/>' "record overrides the name"
 has three/etc/7dtd/pvp/serverconfig.xml '<property name="PlayerKillingMode" value="3"/>' "record overrides pvp mode"
 has three/etc/7dtd/creative/serverconfig.xml '<property name="GameWorld" value="Navezgane"/>' "record overrides the world"
@@ -70,12 +72,17 @@ has badslug.log "must be 1-32 characters" "and the rule is stated"
 run noslug '[{"GameName":"x"}]'; ok "$?" 1 "a record with no slug is refused"
 run dupe '[{"Slug":"main"},{"Slug":"main"}]'; ok "$?" 1 "a duplicate slug is refused"
 has dupe.log "duplicate Slug" "and named"
-run collide '[{"Slug":"a"},{"Slug":"b"}]' 8081 8080; ok "$?" 1 "a dashboard base below the console base is refused"
-has collide.log "two servers were allocated the same port (8081)" "the colliding port is named"
-has collide.log "a: game 26900-26903, telnet 8081, dashboard 8080" "the whole allocation is printed"
-has collide.log "b: game 26904-26907, telnet 8082, dashboard 8081" "including the server that collided"
-has collide.log "TelnetPort and WebDashboardPort are bases" "and which knob to move"
-run telnetinrange '[{"Slug":"a"},{"Slug":"b"}]' 26907 8200; ok "$?" 1 "a console base inside the game range is refused too"
+# Consoles and dashboards come off one base with a stride of two, so no
+# number of servers can make them meet - the old two-base collision is gone by
+# construction. What is left to refuse is a base sitting on the game range.
+run adminspread "$(python3 -c 'import json;print(json.dumps([{"Slug":"s%d"%i} for i in range(25)]))')"
+ok "$?" 0 "25 servers allocate cleanly"
+has adminspread/etc/7dtd/s24/serverconfig.xml '<property name="TelnetPort" value="8129"/>' "the 25th console lands on 8129"
+has adminspread/etc/7dtd/s24/serverconfig.xml '<property name="WebDashboardPort" value="8130"/>' "and its dashboard on 8130"
+run admininrange '[{"Slug":"a"}]' 26950; ok "$?" 1 "an admin base inside the game range is refused"
+has admininrange.log "inside the 26900-26999 game range" "and says why"
+run adminoverlap '[{"Slug":"a"},{"Slug":"b"}]' 26898; ok "$?" 1 "so is one whose pair walks into it"
+run adminhigh '[{"Slug":"a"}]' 65000; ok "$?" 0 "the highest allowed base still fits the port space"
 run notarray '{"Slug":"main"}'; ok "$?" 1 "a bare object is refused"
 run empty '[]'; ok "$?" 1 "an empty list is refused"
 run garbage 'not json at all'; ok "$?" 1 "unparseable JSON is refused"

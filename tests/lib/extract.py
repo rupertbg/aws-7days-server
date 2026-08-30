@@ -36,8 +36,7 @@ PARAMS = {
     'NotifyTopic': 'arn:aws:sns:us-east-1:111111111111:topic',
     'S3BucketName': 'test-bucket',
     'Servers': '[{"Slug":"main"}]',
-    'TelnetPort': '8081',
-    'WebDashboardPort': '8200',
+    'AdminPortBase': '8081',
 }
 
 SUPERVISION = ('7dtd-idle-check', '7dtd-health-check', '7dtd-daily-refresh')
@@ -121,8 +120,7 @@ PREAMBLE = '''#!/bin/bash
 set -euxo pipefail
 ROOT=$1
 SERVERS_JSON=$2
-TELNET_BASE=${3:-8081}
-DASH_BASE=${4:-8200}
+ADMIN_BASE=${3:-8081}
 mkdir -p "$ROOT/etc/7dtd" "$ROOT/opt/games/userdata" "$ROOT/run"
 PUBLIC_IP=203.0.113.10
 SERVER_REGION=Oceania
@@ -149,8 +147,7 @@ def main():
     body = sandbox(section(script, '# --- The server set',
                            '# --- Telnet console reader'))
     body = (body
-            .replace('(( 8081 +', '(( TELNET_BASE +')
-            .replace('(( 8200 +', '(( DASH_BASE +')
+            .replace('(( 8081 +', '(( ADMIN_BASE +')
             .replace('cat > $ROOT/run/7dtd-servers.json <<\'SERVERSJSON\'\n'
                      '[{"Slug":"main"}]\nSERVERSJSON',
                      'printf \'%s\\n\' "$SERVERS_JSON" > $ROOT/run/7dtd-servers.json'))

@@ -829,7 +829,15 @@ Resources:
                   # into as servers are added.
                   dupe_ports=$(awk '{print $3; print $3+1; print $3+2; print $3+3; print $4; print $5}' /run/7dtd-manifest | sort -n | uniq -d)
                   if [ -n "$dupe_ports" ]; then
-                    echo "ERROR: port collision across servers on $(echo "$dupe_ports" | tr '\n' ' '). Move TelnetPort and WebDashboardPort clear of each other and of the game port range." >&2
+                    # Print the whole allocation, not just the offending number:
+                    # the two ports that met belong to different servers and
+                    # different bases, and which base to move is not guessable
+                    # from the collision alone.
+                    echo "ERROR: two servers were allocated the same port ($(echo "$dupe_ports" | tr '\n' ' ' | sed 's/ $//')). Allocated:" >&2
+                    while read -r _idx m_slug m_game m_telnet m_dash; do
+                      echo "  $m_slug: game $m_game-$(( m_game + 3 )), telnet $m_telnet, dashboard $m_dash" >&2
+                    done < /run/7dtd-manifest
+                    echo "TelnetPort and WebDashboardPort are bases - server N gets base + N - so they must be far enough apart that their ranges cannot meet. The defaults, ${TelnetPort} and ${WebDashboardPort}, leave room for $(( ${WebDashboardPort} - ${TelnetPort} )) servers." >&2
                     exit 1
                   fi
                   awk '{print $2}' /run/7dtd-manifest > /etc/7dtd/servers

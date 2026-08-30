@@ -8,7 +8,7 @@ HARNESS=build/server-set.sh
 WORK=build/work
 pass=0; fail=0
 
-run() { # run <case> <servers-json> [porttop] [telnetbase] [dashbase]
+run() { # run <case> <servers-json> [telnetbase] [dashbase]
   local case=$1; shift
   rm -rf "$WORK/$case"; mkdir -p "$WORK/$case"
   bash "$HARNESS" "$WORK/$case" "$@" > "$WORK/$case.log" 2>&1
@@ -41,7 +41,7 @@ has one/etc/7dtd/main/server.env 'TELNET_PORT=8081' "env carries the console por
 exists one/opt/games/userdata/main/Saves/serveradmin.xml "admin file is in the Saves folder"
 
 echo "three servers each get their own port block"
-run three '[{"Slug":"main"},{"Slug":"pvp","ServerName":"PvP Realm","GameName":"PvPWorld","PlayerKillingMode":"3"},{"Slug":"creative","GameWorld":"Navezgane"}]' 26911
+run three '[{"Slug":"main"},{"Slug":"pvp","ServerName":"PvP Realm","GameName":"PvPWorld","PlayerKillingMode":"3"},{"Slug":"creative","GameWorld":"Navezgane"}]'
 ok "$?" 0 "bootstrap succeeds"
 ok "$(tr '\n' ' ' < "$WORK/three/etc/7dtd/servers")" "main pvp creative " "list keeps parameter order"
 has three/etc/7dtd/pvp/serverconfig.xml '<property name="ServerPort" value="26904"/>' "second game port is +4"
@@ -51,14 +51,16 @@ has three/etc/7dtd/creative/serverconfig.xml '<property name="WebDashboardPort" 
 has three/etc/7dtd/pvp/serverconfig.xml '<property name="ServerName" value="PvP Realm"/>' "record overrides the name"
 has three/etc/7dtd/pvp/serverconfig.xml '<property name="PlayerKillingMode" value="3"/>' "record overrides pvp mode"
 has three/etc/7dtd/creative/serverconfig.xml '<property name="GameWorld" value="Navezgane"/>' "record overrides the world"
-has three/etc/7dtd/main/serverconfig.xml '<property name="GameWorld" value="RWG"/>' "unset field falls back"
-has three/etc/7dtd/creative/serverconfig.xml '<property name="ServerName" value="7 Days to Die on AWS"/>' "unset name falls back"
+has three/etc/7dtd/main/serverconfig.xml '<property name="GameWorld" value="RWG"/>' "unset field falls back to the built-in default"
+has three/etc/7dtd/creative/serverconfig.xml '<property name="ServerName" value="7 Days to Die on AWS"/>' "so does an unset name"
+has three/etc/7dtd/main/serverconfig.xml '<property name="SandboxCode" value="AAAJABJACJADJARFBNC"/>' "and the sandbox preset"
+has three/etc/7dtd/main/serverconfig.xml '<property name="WebDashboardEnabled" value="true"/>' "and the dashboard toggle"
 has three/etc/7dtd/pvp/server.env 'SERVER_NAME=PvP\ Realm' "a name with spaces survives being sourced"
 
 echo "refuses a deployment it cannot serve"
-run overflow '[{"Slug":"a"},{"Slug":"b"}]' 26903
-ok "$?" 1 "ports past PortNumberTop are refused"
-has overflow.log "Raise PortNumberTop to at least 26907" "and the message names the fix"
+run overflow "$(python3 -c 'import json;print(json.dumps([{"Slug":"s%d"%i} for i in range(780)]))')"
+ok "$?" 1 "a server whose ports run past the top of the range is refused"
+has overflow.log "past the 30000 top of the range" "and the message says why"
 absent overflow/etc/7dtd/servers "nothing is written on refusal"
 run badslug '[{"Slug":"my server"}]'; ok "$?" 1 "a slug with a space is refused"
 has badslug.log "must be 1-32 characters" "and the rule is stated"
@@ -70,6 +72,12 @@ has collide.log "port collision across servers" "and named"
 run notarray '{"Slug":"main"}'; ok "$?" 1 "a bare object is refused"
 run empty '[]'; ok "$?" 1 "an empty list is refused"
 run garbage 'not json at all'; ok "$?" 1 "unparseable JSON is refused"
+
+run dash '[{"Slug":"quiet","WebDashboardEnabled":"false","ServerVisibility":"0","ServerMaxPlayerCount":"4"}]'
+ok "$?" 0 "bootstrap succeeds"
+has dash/etc/7dtd/quiet/serverconfig.xml '<property name="WebDashboardEnabled" value="false"/>' "a record can turn its own dashboard off"
+has dash/etc/7dtd/quiet/serverconfig.xml '<property name="ServerVisibility" value="0"/>' "and hide itself from the browser"
+has dash/etc/7dtd/quiet/serverconfig.xml '<property name="ServerMaxPlayerCount" value="4"/>' "and set its own player cap"
 
 echo "per-server property overrides"
 run overrides '[{"Slug":"lite","ServerPropertyOverrides":"MaxSpawnedZombies=16,LandClaimSize=71,SomeNewProperty=yes"}]'
@@ -87,16 +95,16 @@ run telnetoverride '[{"Slug":"a","ServerPropertyOverrides":"TelnetPort=9000"}]'
 ok "$?" 1 "so is a console port override"
 
 echo "admins are per server"
-run admins '[{"Slug":"a","AdminSteamIds":"76561198000000001,76561198000000002"},{"Slug":"b","AdminPermissionLevel":"500"}]' 26907
+run admins '[{"Slug":"a","AdminSteamIds":"76561198000000001,76561198000000002"},{"Slug":"b","AdminPermissionLevel":"500"}]'
 ok "$?" 0 "bootstrap succeeds"
 ok "$(count admins/opt/games/userdata/a/Saves/serveradmin.xml '<user ')" "2" "both ids land, including the last"
 has admins/opt/games/userdata/a/Saves/serveradmin.xml 'userid="76561198000000001" permission_level="0"' "at the default level"
 ok "$(count admins/opt/games/userdata/b/Saves/serveradmin.xml '<user ')" "0" "a server with no ids has no admins"
 
 echo "dropping a server from the parameter"
-run drop '[{"Slug":"keep"},{"Slug":"drop"}]' 26907
+run drop '[{"Slug":"keep"},{"Slug":"drop"}]'
 echo worldstate > "$WORK/drop/opt/games/userdata/drop/Saves/marker"
-bash "$HARNESS" "$WORK/drop" '[{"Slug":"keep"}]' 26907 > "$WORK/drop2.log" 2>&1
+bash "$HARNESS" "$WORK/drop" '[{"Slug":"keep"}]' > "$WORK/drop2.log" 2>&1
 ok "$?" 0 "the cfn-hup re-run succeeds"
 ok "$(cat "$WORK/drop/etc/7dtd/servers")" "keep" "the list shrinks"
 absent drop/etc/7dtd/drop "its config is removed"

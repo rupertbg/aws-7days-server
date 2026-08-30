@@ -43,18 +43,15 @@ Parameters:
 
   PortNumber:
     Type: Number
-    Description: Primary game port (modern 7DTD default is 26900)
-    Default: 26900
-
-  PortNumberTop:
-    Type: Number
     Description: >-
-      Top of the game port range opened in the security group. Each server in
-      the Servers parameter claims four consecutive ports starting at
-      PortNumber, so this must be at least PortNumber + 4 * (number of servers)
-      - 1: 26903 for one server, 26907 for two, 26911 for three. The bootstrap
-      refuses to start a server whose ports fall outside this range.
-    Default: 26903
+      Game port of the first server (modern 7DTD default is 26900). Each entry
+      in Servers claims four consecutive ports from here, so server N listens
+      on PortNumber + 4N through +3. The security group opens PortNumber to
+      30000 in one range, which is why there is no top-end parameter to keep in
+      step with the number of servers.
+    Default: 26900
+    MinValue: 1024
+    MaxValue: 29900
 
   GamePassword:
     Type: AWS::SSM::Parameter::Value<String>
@@ -91,23 +88,6 @@ Parameters:
       must be clicked before any notification is delivered.
     Default: 7days-notify-email
 
-  WorldGenSeed:
-    Type: String
-    Description: >-
-      Seed for the random-gen map. Any string; the same seed and size always
-      generate the same world. Only used when GameWorld is RWG. Changing it
-      after a world exists does NOT regenerate it - the save on the volume
-      keeps being used.
-    Default: SevenDaysOnAws
-
-  SandboxCode:
-    Type: String
-    Description: >-
-      V3.0 sandbox configuration string (encodes difficulty, zombie speed, loot,
-      blood moon, drop-on-death, day length, etc). Generate your own from the
-      in-game Sandbox Options menu. Default is the standard Adventurer preset.
-    Default: AAAJABJACJADJARFBNC
-
   AutoShutdown:
     Type: String
     Description: >-
@@ -126,153 +106,30 @@ Parameters:
     Type: String
     Description: >-
       JSON array of the worlds this one instance hosts, one object per server.
-      Only "Slug" is required (1-32 characters of A-Za-z0-9_- starting
-      alphanumeric); it names the save folder, the systemd unit, the S3 address
-      object and the backup prefix, so keep it stable - changing it starts a new
-      world. Every other field is optional and falls back to the matching
-      parameter below: ServerName, ServerDescription, ServerWebsiteURL,
-      ServerVisibility, ServerMaxPlayerCount, ServerReservedSlots,
-      ServerReservedSlotsPermission, GameWorld, GameName, WorldGenSeed,
-      WorldGenSize, SandboxCode, PlayerKillingMode, AdminSteamIds,
-      AdminPermissionLevel, ServerPropertyOverrides. Ports are allocated from
-      each record's position in the list, not set here. Example:
+      Every per-server setting lives here and nowhere else; the parameters
+      outside this one are host-level. Only "Slug" is required (1-32 characters
+      of A-Za-z0-9_- starting alphanumeric): it names the save folder, the
+      systemd unit, the S3 address object and the backup prefix, so keep it
+      stable - changing it starts a new world. Optional fields, with the value
+      used when omitted: ServerName (7 Days to Die on AWS), ServerDescription,
+      ServerWebsiteURL (empty), ServerVisibility (2), ServerMaxPlayerCount (16),
+      ServerReservedSlots (2), ServerReservedSlotsPermission (100), GameWorld
+      (RWG), GameName (SevenDaysOnAws), WorldGenSeed (SevenDaysOnAws),
+      WorldGenSize (6144), SandboxCode (the Adventurer preset),
+      PlayerKillingMode (2), AdminSteamIds (empty, so no admins),
+      AdminPermissionLevel (0), WebDashboardEnabled (true),
+      ServerPropertyOverrides (empty). These land in serverconfig.xml as
+      attribute values, so any text must be XML-safe: write & as &amp; and
+      < as &lt;, and do not use a double quote. Ports are allocated from each
+      record's position in the list and cannot be set here. Example:
       [{"Slug":"main"},{"Slug":"pvp","ServerName":"PvP","GameName":"PvPWorld","PlayerKillingMode":"3"}].
-      Adding servers means raising PortNumberTop and sizing InstanceType for
-      them - see the README.
+      Adding servers means sizing InstanceType for them - see the README.
     Default: '[{"Slug":"main"}]'
     MinLength: 1
 
-  # --- Server identity (what players see in the server browser) --------------
-  # These are the defaults every entry in Servers inherits for the fields it
-  # does not set itself. They land in serverconfig.xml as attribute values, so
-  # any text here must be XML-safe: write & as &amp; and < as &lt;, and do not
-  # use a double quote.
-
-  ServerName:
-    Type: String
-    Description: Name shown in the server browser.
-    Default: 7 Days to Die on AWS
-    MinLength: 1
-
-  ServerDescription:
-    Type: String
-    Description: Description shown in the server browser.
-    Default: A 7 Days to Die dedicated server running on AWS.
-
-  ServerWebsiteURL:
-    Type: String
-    Description: Website link shown in the server browser. Leave empty for none.
-    Default: ''
-
-  ServerVisibility:
-    Type: Number
-    Description: >-
-      0 = not listed (join by IP only), 1 = friends only, 2 = public listing in
-      the server browser.
-    AllowedValues:
-      - 0
-      - 1
-      - 2
-    Default: 2
-
-  ServerMaxPlayerCount:
-    Type: Number
-    Description: Maximum concurrent players.
-    Default: 16
-    MinValue: 1
-
-  ServerReservedSlots:
-    Type: Number
-    Description: >-
-      Slots held back for players whose permission level is at or above
-      ServerReservedSlotsPermission (see AdminPermissionLevel; a LOWER number
-      means more power).
-    Default: 2
-    MinValue: 0
-
-  ServerReservedSlotsPermission:
-    Type: Number
-    Description: Permission level required to claim a reserved slot.
-    Default: 100
-    MinValue: 0
-    MaxValue: 1000
-
-  # --- Admins ----------------------------------------------------------------
-
-  AdminSteamIds:
-    Type: String
-    Description: >-
-      Comma-separated SteamID64s granted admin on the server - the 17-digit id
-      at the end of a steamcommunity.com/profiles/ URL, e.g.
-      "76561197960265728,76561197960265729". Empty (the default) means no
-      admins are configured. Rewritten on every launch from this parameter, so
-      in-game admin edits do not survive a relaunch.
-    Default: ''
-    AllowedPattern: '^\s*([0-9]{17}\s*(,\s*[0-9]{17}\s*)*)?$'
-    ConstraintDescription: >-
-      Must be empty, or a comma-separated list of 17-digit SteamID64 values.
-
-  AdminPermissionLevel:
-    Type: Number
-    Description: >-
-      Permission level given to every id in AdminSteamIds. 0 is full admin,
-      1000 is a default player - LOWER means MORE power.
-    Default: 0
-    MinValue: 0
-    MaxValue: 1000
-
-  # --- World -----------------------------------------------------------------
-
-  GameWorld:
-    Type: String
-    Description: >-
-      RWG for a random-generated world (uses WorldGenSeed and WorldGenSize), or
-      the name of a prebuilt world such as Navezgane.
-    Default: RWG
-    MinLength: 1
-
-  GameName:
-    Type: String
-    Description: >-
-      Save game name. This names the save folder on the persistent volume, so
-      changing it starts a new world rather than loading the existing one.
-    Default: SevenDaysOnAws
-    MinLength: 1
-
-  WorldGenSize:
-    Type: Number
-    Description: >-
-      Random-gen world size in metres; must be a multiple of 1024 between 4096
-      and 16384. Bigger worlds need more memory (see InstanceType).
-    Default: 6144
-    MinValue: 4096
-    MaxValue: 16384
-
-  PlayerKillingMode:
-    Type: Number
-    Description: >-
-      0 = no player killing, 1 = kill allies only, 2 = kill strangers only,
-      3 = kill everyone.
-    AllowedValues:
-      - 0
-      - 1
-      - 2
-      - 3
-    Default: 2
-
-  ServerPropertyOverrides:
-    Type: String
-    Description: >-
-      Escape hatch for every serverconfig.xml property that does not have its
-      own parameter above (land claims, zombie counts, safe zones, EAC,
-      crossplay, dynamic mesh, and so on). Comma-separated Name=Value pairs,
-      e.g. "MaxSpawnedZombies=64,EACEnabled=true,LandClaimSize=41". Each entry
-      replaces that property if the template already writes it, and is appended
-      if it does not. A value may contain an equals sign (only the first one
-      splits the pair) but not a comma, and must be XML-safe.
-    Default: ''
-
   # --- Console and web dashboard ---------------------------------------------
+  # Allocation bases, not values written into a config: server N gets base + N.
+  # Neither port is opened by the security group.
 
   TelnetPort:
     Type: Number
@@ -284,17 +141,6 @@ Parameters:
     Default: 8081
     MinValue: 1
     MaxValue: 65535
-
-  WebDashboardEnabled:
-    Type: String
-    Description: >-
-      Whether the game's web dashboard listens on WebDashboardPort. Also not
-      opened in the security group, so reaching it means tunnelling in (e.g.
-      SSH port-forward) - it is not exposed to the internet by this template.
-    AllowedValues:
-      - 'true'
-      - 'false'
-    Default: 'true'
 
   WebDashboardPort:
     Type: Number
@@ -524,24 +370,29 @@ Resources:
         - CidrIp: 0.0.0.0/0
           IpProtocol: -1
       SecurityGroupIngress:
-        # Modern 7DTD uses TCP + UDP across ServerPort..ServerPort+3 (26900-26903,
-        # the top port covering EOS/crossplay). Open to anywhere over both IPv4
-        # (0.0.0.0/0) and IPv6 (::/0).
+        # Modern 7DTD uses TCP + UDP across ServerPort..ServerPort+3 (the top
+        # port covering EOS/crossplay), and each server on this host claims its
+        # own block of four from PortNumber. The range is opened once, wide
+        # enough for far more servers than an instance could run, rather than
+        # made an operator-set ceiling to keep in step with the server count -
+        # a ceiling one server short opens a world nobody can reach. Nothing
+        # else on the instance listens in this range. Open to anywhere over
+        # both IPv4 (0.0.0.0/0) and IPv6 (::/0).
         - CidrIp: 0.0.0.0/0
           FromPort: !Ref PortNumber
-          ToPort: !Ref PortNumberTop
+          ToPort: 30000
           IpProtocol: udp
         - CidrIpv6: ::/0
           FromPort: !Ref PortNumber
-          ToPort: !Ref PortNumberTop
+          ToPort: 30000
           IpProtocol: udp
         - CidrIp: 0.0.0.0/0
           FromPort: !Ref PortNumber
-          ToPort: !Ref PortNumberTop
+          ToPort: 30000
           IpProtocol: tcp
         - CidrIpv6: ::/0
           FromPort: !Ref PortNumber
-          ToPort: !Ref PortNumberTop
+          ToPort: 30000
           IpProtocol: tcp
 
   LaunchTemplate:
@@ -894,36 +745,33 @@ Resources:
                   fi
                   SERVER_COUNT=$(jq 'length' /run/7dtd-servers.json)
 
-                  # Stack-level defaults every record inherits for the fields it
-                  # does not set. One Name=Value per line: a CloudFormation String
-                  # parameter cannot contain a newline, so the first = always
-                  # splits correctly, and a value may itself contain =. Mode 0600
-                  # because the two passwords are in here; deleted at the end.
-                  install -m 0600 /dev/null /run/7dtd-defaults
-                  cat > /run/7dtd-defaults <<'DEFAULTS'
-                  ServerName=${ServerName}
-                  ServerDescription=${ServerDescription}
-                  ServerWebsiteURL=${ServerWebsiteURL}
-                  ServerVisibility=${ServerVisibility}
-                  ServerMaxPlayerCount=${ServerMaxPlayerCount}
-                  ServerReservedSlots=${ServerReservedSlots}
-                  ServerReservedSlotsPermission=${ServerReservedSlotsPermission}
-                  GameWorld=${GameWorld}
-                  GameName=${GameName}
-                  WorldGenSeed=${WorldGenSeed}
-                  WorldGenSize=${WorldGenSize}
-                  SandboxCode=${SandboxCode}
-                  PlayerKillingMode=${PlayerKillingMode}
-                  AdminSteamIds=${AdminSteamIds}
-                  AdminPermissionLevel=${AdminPermissionLevel}
-                  ServerPropertyOverrides=${ServerPropertyOverrides}
-                  GamePassword=${GamePassword}
-                  AdminPassword=${AdminPassword}
-                  DEFAULTS
-
-                  # def_get <field>: the stack-parameter default for that field.
-                  def_get() {
-                    sed -n "s/^$1=//p" /run/7dtd-defaults | head -n1
+                  # What a record gets for a field it does not set. These live
+                  # here rather than as CloudFormation parameters because every
+                  # one of them is per-server: a parameter would be a second
+                  # place to say the same thing, and nothing would keep the two
+                  # in step. The README lists them alongside the field names.
+                  srv_default() {
+                    case "$1" in
+                      ServerName)                    echo '7 Days to Die on AWS' ;;
+                      ServerDescription)             echo 'A 7 Days to Die server, running on AWS' ;;
+                      ServerVisibility)              echo 2 ;;
+                      ServerMaxPlayerCount)          echo 16 ;;
+                      ServerReservedSlots)           echo 2 ;;
+                      ServerReservedSlotsPermission) echo 100 ;;
+                      GameWorld)                     echo RWG ;;
+                      GameName)                      echo SevenDaysOnAws ;;
+                      WorldGenSeed)                  echo SevenDaysOnAws ;;
+                      WorldGenSize)                  echo 6144 ;;
+                      SandboxCode)                   echo AAAJABJACJADJARFBNC ;;
+                      PlayerKillingMode)             echo 2 ;;
+                      AdminPermissionLevel)          echo 0 ;;
+                      WebDashboardEnabled)           echo true ;;
+                      # ServerWebsiteURL, AdminSteamIds and
+                      # ServerPropertyOverrides all default to nothing - in
+                      # particular an empty admin list means a fresh deployment
+                      # has no admins until its owner names Steam ids.
+                      *)                             echo '' ;;
+                    esac
                   }
                   # srv_get <index> <field>: that server's value, or the default.
                   # jq's // treats only null and false as absent, so a numeric 0
@@ -935,7 +783,7 @@ Resources:
                   srv_get() {
                     local v
                     v=$(jq -r --argjson i "$1" --arg f "$2" '.[$i][$f] // empty' /run/7dtd-servers.json)
-                    if [ -n "$v" ]; then printf '%s\n' "$v"; else def_get "$2"; fi
+                    if [ -n "$v" ]; then printf '%s\n' "$v"; else srv_default "$2"; fi
                   }
 
                   # --- Port allocation ------------------------------------------
@@ -943,11 +791,12 @@ Resources:
                   # they cannot be set into a collision by hand: 7DTD claims
                   # ServerPort..ServerPort+3, so each world takes a block of 4 from
                   # PortNumber, and one port each from the telnet and dashboard
-                  # bases. CloudFormation cannot count the entries of a JSON string
-                  # parameter, so the security group's range stays operator-set
-                  # (PortNumber..PortNumberTop) and is checked here instead: a world
-                  # whose ports the group does not open would appear in the browser
-                  # and refuse every connection, which is worse than not booting.
+                  # bases. The security group opens PortNumber..30000 in one
+                  # fixed range, so this only has to catch a PortNumber set so
+                  # high that a later server would run off the end - a world
+                  # whose ports the group does not open would appear in the
+                  # browser and refuse every connection, which is worse than
+                  # not booting.
                   : > /run/7dtd-manifest
                   i=0
                   while [ "$i" -lt "$SERVER_COUNT" ]; do
@@ -961,8 +810,8 @@ Resources:
                     game_port=$(( ${PortNumber} + i * 4 ))
                     telnet_port=$(( ${TelnetPort} + i ))
                     dash_port=$(( ${WebDashboardPort} + i ))
-                    if [ "$(( game_port + 3 ))" -gt "${PortNumberTop}" ]; then
-                      echo "ERROR: server '$slug' needs game ports $game_port-$(( game_port + 3 )) but the security group only opens ${PortNumber}-${PortNumberTop}. Raise PortNumberTop to at least $(( game_port + 3 ))." >&2
+                    if [ "$(( game_port + 3 ))" -gt 30000 ]; then
+                      echo "ERROR: server '$slug' needs game ports $game_port-$(( game_port + 3 )), past the 30000 top of the range the security group opens. Lower PortNumber (currently ${PortNumber}) or run fewer servers." >&2
                       exit 1
                     fi
                     printf '%s %s %s %s %s\n' "$i" "$slug" "$game_port" "$telnet_port" "$dash_port" >> /run/7dtd-manifest
@@ -988,12 +837,23 @@ Resources:
                   # and telnet passwords into the cloud-init log on every launch.
                   # Progress is echoed explicitly instead.
                   set +x
-                  game_pw=$(def_get GamePassword)
+                  # The only per-config values still coming from a stack
+                  # parameter, because both are SSM parameter names shared by
+                  # every server on the host. Through a quoted heredoc so a
+                  # password containing shell metacharacters cannot be
+                  # re-parsed, and 0600 on tmpfs for the seconds it exists.
+                  install -m 0600 /dev/null /run/7dtd-passwords
+                  cat > /run/7dtd-passwords <<'PASSWORDS'
+                  game=${GamePassword}
+                  admin=${AdminPassword}
+                  PASSWORDS
+                  game_pw=$(sed -n 's/^game=//p' /run/7dtd-passwords | head -n1)
                   # An SSM parameter cannot hold an empty string, so the literal
                   # text 'none' in the parameter that GamePassword names is how the
                   # operator asks for an open server.
                   if [ "$game_pw" = none ]; then game_pw=""; fi
-                  admin_pw=$(def_get AdminPassword)
+                  admin_pw=$(sed -n 's/^admin=//p' /run/7dtd-passwords | head -n1)
+                  rm -f /run/7dtd-passwords
 
                   # Appends one property to the config being written. printf, not a
                   # heredoc, so an operator-supplied value is never re-parsed on its
@@ -1058,7 +918,7 @@ Resources:
                     xml_prop EACEnabled false
                     xml_prop IgnoreEOSSanctions false
 
-                    xml_prop WebDashboardEnabled "${WebDashboardEnabled}"
+                    xml_prop WebDashboardEnabled "$(srv_get "$idx" WebDashboardEnabled)"
                     xml_prop WebDashboardPort "$dash_port"
                     xml_prop WebDashboardUrl ""
                     # Off: tile rendering writes to the save volume on every
@@ -1193,10 +1053,10 @@ Resources:
                     chmod 0644 "$SRV_DIR/server.env"
                   done < /run/7dtd-manifest
                   set -x
-                  # Both passwords are in the defaults file and nothing past this
-                  # point reads it, or the manifest. /etc/7dtd/servers and the
-                  # per-server server.env files are what the running host uses.
-                  rm -f /run/7dtd-defaults /run/7dtd-servers.json /run/7dtd-manifest
+                  # Nothing past this point reads the parsed server list or the
+                  # manifest; /etc/7dtd/servers and the per-server server.env
+                  # files are what the running host uses.
+                  rm -f /run/7dtd-servers.json /run/7dtd-manifest
 
                   # cfn-hup re-runs this bootstrap in place, so a world dropped from
                   # the Servers parameter would otherwise keep running as an orphan
@@ -1912,7 +1772,7 @@ Resources:
           - ResourceType: instance
             Tags:
               - Key: Name
-                Value: !Ref ServerName
+                Value: !Ref AWS::StackName
               - Key: AccessControl
                 Value: !Ref AccessControlTagValue
         UserData:
@@ -1988,7 +1848,7 @@ Resources:
       HealthCheckGracePeriod: 600
       Tags:
         - Key: Name
-          Value: !Ref ServerName
+          Value: !Ref AWS::StackName
           PropagateAtLaunch: true
         - Key: AccessControl
           Value: !Ref AccessControlTagValue

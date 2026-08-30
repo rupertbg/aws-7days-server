@@ -106,12 +106,10 @@ Size the volume for capacity rather than speed: the game install plus SteamCMD i
 ## Configuration
 The main 7 Days to Die server configuration is a `serverconfig.xml` written to `/etc/7dtd/<slug>/serverconfig.xml` by the instance's bootstrap (defined in `instance.yml`), one per server. It is rewritten on every launch from the stack's parameters, so the template is the source of truth and the config never drifts. Nothing about the server needs you to edit the template: everything is a CloudFormation parameter.
 
-As of 7 Days to Die V3.0, gameplay settings (difficulty, zombie speed, loot, blood moon, drop-on-death, day length, air drops, etc.) are no longer individual properties. They are all encoded in a single `SandboxCode` string, exposed here as the `SandboxCode` CloudFormation parameter. Generate your own from the in-game Sandbox Options menu; the default is the standard Adventurer preset.
+As of 7 Days to Die V3.0, gameplay settings (difficulty, zombie speed, loot, blood moon, drop-on-death, day length, air drops, etc.) are no longer individual properties. They are all encoded in a single `SandboxCode` string, which each `Servers` record sets for itself - so two worlds on the same host can play at different difficulties. Generate your own from the in-game Sandbox Options menu; the default is the standard Adventurer preset.
 
-### Running more than one server
-`Servers` is a JSON array, one object per world the instance hosts. Its default, `[{"Slug":"main"}]`, is a single server configured entirely from the top-level parameters - so a deployment that never touches it behaves as a single-server deployment.
-
-Only `Slug` is required. It is 1-32 characters of `A-Za-z0-9_-` starting alphanumeric, and it names that server's save folder, systemd unit, S3 address object and backup prefix, so **keep it stable**: changing a slug starts a new world rather than renaming the old one. Every other field is optional and falls back to the matching top-level parameter: `ServerName`, `ServerDescription`, `ServerWebsiteURL`, `ServerVisibility`, `ServerMaxPlayerCount`, `ServerReservedSlots`, `ServerReservedSlotsPermission`, `GameWorld`, `GameName`, `WorldGenSeed`, `WorldGenSize`, `SandboxCode`, `PlayerKillingMode`, `AdminSteamIds`, `AdminPermissionLevel`, `ServerPropertyOverrides`.
+### The `Servers` parameter
+`Servers` is a JSON array, one object per world the instance hosts. **Every per-server setting lives here and nowhere else**; the parameters in the next section are host-level. Its default, `[{"Slug":"main"}]`, is a single server on the built-in defaults, so a deployment that never touches it behaves as a single-server deployment.
 
 ```json
 [
@@ -122,26 +120,12 @@ Only `Slug` is required. It is 1-32 characters of `A-Za-z0-9_-` starting alphanu
 ]
 ```
 
-**Ports come from each record's position in the list, not from the record.** Server *N* (counting from zero) gets game ports `PortNumber + 4N` through `+3`, telnet `TelnetPort + N`, and web dashboard `WebDashboardPort + N`. So the example above listens on 26900-26903, 26904-26907 and 26908-26911.
+`Slug` is the only required field: 1-32 characters of `A-Za-z0-9_-` starting alphanumeric. It names that server's save folder, systemd unit, S3 address object and backup prefix, so **keep it stable** - changing a slug starts a new world rather than renaming the old one.
 
-Two consequences to plan for:
-
-- **Raise `PortNumberTop`.** It is what the security group opens, and it defaults to 26903 - enough for one server. Three servers need 26911. The bootstrap refuses to start rather than bringing up a world nobody can reach, and the error names the value to use.
-- **Reordering the list re-assigns ports.** Append new servers rather than inserting them, or players' saved entries point at the wrong world.
-
-Removing a record stops that server's units on the next launch (or within the cfn-hup poll interval) and deletes its generated config. **Its save data is left on the volume**, so putting the record back with the same slug resumes the same world.
-
-Everything else that supervises the host is per-host, not per-server: `7days.bat` starts and stops all of them together, and idle shutdown fires only when *every* world is empty. See [Idle Shutdown](#idle-shutdown).
-
-### Parameters
-Every parameter has a working default except `SubnetId`, `VpcId` and `KeyPair`, so a default deployment gives you one unnamed public server with no admins, and no join password if `7days-game-password` holds `none`. Four defaults - `GamePassword`, `AdminPassword`, `S3BucketName` and `NotifyEmail` - are SSM parameter *names*, and those parameters must exist before you deploy (step 4 below).
-
-Except for `Servers` itself, every parameter in the "what players see" and "gameplay" groups below is the **default each `Servers` record inherits** for a field it does not set.
-
-| Parameter | Default | What it does |
+| Field | Used when omitted | What it does |
 | --- | --- | --- |
-| `Servers` | `[{"Slug":"main"}]` | JSON list of the worlds this instance hosts. See [Running more than one server](#running-more-than-one-server). |
-| `ServerName` | `7 Days to Die on AWS` | Name in the server browser. Also the `Name` tag on the ASG and instances. |
+| `Slug` | *required* | Identity of this server on the host and in S3. |
+| `ServerName` | `7 Days to Die on AWS` | Name in the server browser. |
 | `ServerDescription` | generic | Description in the server browser. |
 | `ServerWebsiteURL` | empty | Website link in the server browser. |
 | `ServerVisibility` | `2` | `0` not listed (join by IP), `1` friends only, `2` public listing. |
@@ -149,22 +133,44 @@ Except for `Servers` itself, every parameter in the "what players see" and "game
 | `ServerReservedSlots` / `ServerReservedSlotsPermission` | `2` / `100` | Slots held for players at or above that permission level. |
 | `AdminSteamIds` | empty | Comma-separated SteamID64s to make admins. **Empty means nobody is an admin.** |
 | `AdminPermissionLevel` | `0` | Level given to those ids. 0 is full admin, 1000 is a plain player: lower means more power. |
-| `GamePassword` | `7days-game-password` | **Name of** the SSM parameter holding the join password. See below. |
-| `AdminPassword` | `7days-admin-password` | **Name of** the SSM parameter holding the console password. See below. |
 | `GameWorld` | `RWG` | `RWG` for random-gen, or a prebuilt world such as `Navezgane`. |
 | `GameName` | `SevenDaysOnAws` | Save name. Changing it starts a new world instead of loading the existing save. |
 | `WorldGenSeed` / `WorldGenSize` | `SevenDaysOnAws` / `6144` | Random-gen seed and size (4096-16384, multiple of 1024). Only used for `RWG`, and only when the world is first generated. |
 | `SandboxCode` | Adventurer preset | V3.0 gameplay settings blob. |
 | `PlayerKillingMode` | `2` | 0 none, 1 allies only, 2 strangers only, 3 everyone. |
-| `ServerPropertyOverrides` | empty | Anything else in `serverconfig.xml`. See below. |
-| `TelnetPort` / `WebDashboardEnabled` / `WebDashboardPort` | `8081` / `true` / `8200` | Console and dashboard *base* ports; server N gets base + N. Neither is opened by the security group. |
-| `AutoShutdown` | `enabled` | Whether to scale to zero when empty. |
+| `WebDashboardEnabled` | `true` | Whether this server's web dashboard listens. Its port is not opened by the security group either way. |
+| `ServerPropertyOverrides` | empty | Anything else in this server's `serverconfig.xml`. See [Setting anything else](#setting-anything-else). |
+
+Give each world its own `ServerName` and `GameName` - two servers left on the defaults show up under the same name with the same seed.
+
+These land in `serverconfig.xml` as attribute values, so any text must be XML-safe: write `&` as `&amp;` and `<` as `&lt;`, and do not use a double quote.
+
+**Ports come from each record's position in the list, not from the record.** Server *N* (counting from zero) gets game ports `PortNumber + 4N` through `+3`, telnet `TelnetPort + N`, and web dashboard `WebDashboardPort + N`. So the example above listens on 26900-26903, 26904-26907 and 26908-26911. There is nothing to raise as you add servers: the security group opens `PortNumber` to 30000 in one range, wide enough for far more worlds than an instance could run. Setting `ServerPort`, `TelnetPort` or `WebDashboardPort` through a record's `ServerPropertyOverrides` is refused, because it would move that server onto a neighbour's ports behind the allocator's back.
+
+The one thing to plan for is that **reordering the list re-assigns ports**. Append new servers rather than inserting them, or players' saved entries point at the wrong world.
+
+Removing a record stops that server's units on the next launch (or within the cfn-hup poll interval) and deletes its generated config. **Its save data is left on the volume**, so putting the record back with the same slug resumes the same world.
+
+Everything that supervises the host is per-host, not per-server: `7days.bat` starts and stops all of them together, and idle shutdown fires only when *every* world is empty. See [Idle Shutdown](#idle-shutdown).
+
+### Parameters
+These are the host-level settings - the instance, the volume, the ports, the schedules. Everything a single world decides for itself is a `Servers` field instead.
+
+Every parameter has a working default except `SubnetId`, `VpcId` and `KeyPair`, so a default deployment gives you one server with no admins, and no join password if `7days-game-password` holds `none`. Four defaults - `GamePassword`, `AdminPassword`, `S3BucketName` and `NotifyEmail` - are SSM parameter *names*, and those parameters must exist before you deploy (step 4 below).
+
+| Parameter | Default | What it does |
+| --- | --- | --- |
+| `Servers` | `[{"Slug":"main"}]` | JSON list of the worlds this instance hosts, and every per-server setting. See [The `Servers` parameter](#the-servers-parameter). |
+| `GamePassword` | `7days-game-password` | **Name of** the SSM parameter holding the join password, shared by every server. See below. |
+| `AdminPassword` | `7days-admin-password` | **Name of** the SSM parameter holding the console password, shared by every server. See below. |
+| `PortNumber` | `26900` | Game port of the first server; server N gets `PortNumber + 4N`. The security group opens `PortNumber` to 30000 in one range, so nothing here changes as you add servers. |
+| `TelnetPort` / `WebDashboardPort` | `8081` / `8200` | Console and dashboard *base* ports; server N gets base + N. Neither is opened by the security group. |
+| `AutoShutdown` | `enabled` | Whether to scale to zero when every world is empty. |
 | `IdleGraceMinutes` / `IdleCheckMinutes` | `120` / `20` | Idle grace window and how often it is checked. |
-| `HealthCheckMinutes` / `HealthCheckFailureThreshold` | `5` / `3` | Self-heal poll interval and consecutive failures before replacement. |
+| `HealthCheckMinutes` / `HealthCheckFailureThreshold` | `5` / `3` | Self-heal poll interval, and consecutive failures before a server is restarted (and again before the instance is replaced). |
 | `BackupIntervalHours` | `24` | S3 save-archive cadence during a long session. |
 | `DailyRefresh` / `DailyRefreshTime` | `enabled` / `15:00` | Whether the instance replaces itself once a day, and the UTC time it checks. |
-| `InstanceType` | `r8i.xlarge` | Must be x86-64: 7DTD has no ARM64 server build. |
-| `PortNumber` / `PortNumberTop` | `26900` / `26903` | Game port range opened in the security group. Each server claims four ports from `PortNumber`, so raise the top end by 4 per extra server. |
+| `InstanceType` | `r8i.xlarge` | Must be x86-64: 7DTD has no ARM64 server build. Size it for the number of worlds. |
 | `AddressObjectPrefix` | `7dserver-` | Key prefix under `S3BucketName`; each server's `ip:port` is written to `<prefix><slug>.txt`. |
 | `AccessControlTagValue` | `7Days` | Value of the `AccessControl` tag that `7days.bat` and the IAM policy below match on. Give each deployment its own value if you run more than one. |
 
@@ -181,14 +187,14 @@ There are two, deliberately separate, and both are read from SSM Parameter Store
 The web dashboard, when enabled, authenticates through the game's own admin/permission system rather than a separate password property, and its port is likewise not exposed by the security group.
 
 ### Admins
-`AdminSteamIds` is a comma-separated list of SteamID64s (the 17-digit number at the end of a `steamcommunity.com/profiles/...` URL). They are written to that server's `serveradmin.xml` at `AdminPermissionLevel`, which defaults to `0`: full admin. **The default is an empty list, so a fresh deployment has no admins at all** until you name your own.
+A record's `AdminSteamIds` is a comma-separated list of SteamID64s (the 17-digit number at the end of a `steamcommunity.com/profiles/...` URL). They are written to that server's `serveradmin.xml` at its `AdminPermissionLevel`, which defaults to `0`: full admin. **The default is an empty list, so a fresh deployment has no admins at all** until you name your own.
 
-Admins are per server. The top-level parameter is the default every world inherits; set `AdminSteamIds` (and `AdminPermissionLevel`) inside a `Servers` record to give one world a different list - useful for a PvP or test world you do not want everyone able to `dm` around in.
+Admins are per world, which is the point of them being a `Servers` field - a PvP or test world can have a different list from the main one.
 
 Because `serveradmin.xml` is rewritten on every launch, in-game admin, whitelist and ban edits do not survive a relaunch. Change the parameter and update the stack instead.
 
 ### Setting anything else
-`ServerPropertyOverrides` reaches every `serverconfig.xml` property that has no parameter of its own: land claims, zombie and animal caps, safe zones, EAC, crossplay, dynamic mesh, and any property added by a future game version. Pass comma-separated `Name=Value` pairs:
+A record's `ServerPropertyOverrides` reaches every `serverconfig.xml` property that has no field of its own: land claims, zombie and animal caps, safe zones, EAC, crossplay, dynamic mesh, and any property added by a future game version. Pass comma-separated `Name=Value` pairs:
 
 ```
 MaxSpawnedZombies=64,EACEnabled=false,LandClaimSize=71,BedrollDeadZoneSize=30
@@ -196,7 +202,7 @@ MaxSpawnedZombies=64,EACEnabled=false,LandClaimSize=71,BedrollDeadZoneSize=30
 
 Each pair replaces that property if the template already writes it, and is appended if it does not. A value may contain `=` but not `,`, and any text landing in the XML must be XML-safe (`&amp;` rather than a bare `&`, no double quotes).
 
-Like the rest, this is per server: the top-level parameter is the default, and a `Servers` record can carry its own `ServerPropertyOverrides` instead. It cannot override the ports, which are allocated from the record's index - `ServerPort`, `TelnetPort` and `WebDashboardPort` set here would collide with a neighbouring world.
+Like every other `Servers` field it applies to one world only, so a single server can be tuned without touching the others. It cannot set `ServerPort`, `TelnetPort` or `WebDashboardPort`: those are allocated from the record's index, and an override would move this server onto a neighbour's ports. The bootstrap refuses to start rather than let that happen.
 
 ## Deployment
 There are four CloudFormation templates. `ip.yml` and `volume.yml` can be run in any order. `backup.yml` must run after `volume.yml` (its snapshot policy targets the volume by tag). The instance/ASG template must run last, after all three others (it imports the backup bucket ARN).
@@ -208,7 +214,7 @@ There are four CloudFormation templates. `ip.yml` and `volume.yml` can be run in
     - `7days-admin-password`: the server console password
     - `7days-server-ip-bucket`: An S3 bucket name to upload each server's address file to, containing its IP and port in `0.0.0.0:26900` format.
     - `7days-notify-email`: Email address for server start/stop and player login notifications (see [Email notifications](#email-notifications))
-  5. Deploy `instance.yml`, passing a `SubnetId` in the same Availability Zone as the volume and EIP (`${AWS::Region}a` by default), plus whichever of the parameters above you want to change - at minimum `ServerName` and `AdminSteamIds`, since a fresh deployment has no admins. To run more than one world, also pass `Servers` and a `PortNumberTop` wide enough for it.
+  5. Deploy `instance.yml`, passing a `SubnetId` in the same Availability Zone as the volume and EIP (`${AWS::Region}a` by default), plus whichever of the parameters above you want to change - at minimum a `Servers` value naming your world and its admins, since a fresh deployment has no admins.
   6. Confirm the SNS email subscription from the "AWS Notification - Subscription Confirmation" email sent to `7days-notify-email`. Until that link is clicked, no notifications are delivered.
 
 The dedicated server (Steam app 294420) is downloaded with an anonymous Steam login, so no Steam credentials are required.
@@ -227,16 +233,25 @@ It needs `bash`, `python3` and `jq`, uses `shellcheck` if it is installed, and t
 ## Upgrading an existing single-server deployment
 Each server's world now lives in its own folder, `/opt/games/userdata/<slug>`, rather than directly in `/opt/games/userdata`. **An existing deployment's world will not be found after this change** - the server will generate a fresh one beside it, leaving the old save untouched but unused. Nothing is deleted, but the move is manual.
 
-Take a backup first (the S3 archive of the running server, or an EBS snapshot), then, with the server stopped (`7days.bat stop`) and the volume attached to any instance:
+The volume only exists on a running instance, and `cfn-hup` re-runs the bootstrap in place within about five minutes of a stack update - so the order matters. Take a backup first (the S3 archive of the running server, or an EBS snapshot), then:
+
+1. `7days.bat stop`, or wait for the idle shutdown. Updating while the server is up disconnects players mid-session when the old unit is stopped.
+2. Update the stack. Drop `AddressObjectKey` and the per-server parameters from your update command - they no longer exist, and passing one fails the call. Move their values into `Servers` instead.
+3. `7days.bat start`. The server comes up on a freshly generated world; do not let anyone join yet.
+4. Open a Session Manager shell and move the save into place:
 
 ```bash
-cd /opt/games/userdata
-mkdir -p main                      # or whatever Slug you gave it
-mv Saves GeneratedWorlds main/     # plus anything else the game left at this level
-chown -R sdtd:sdtd main
+systemctl stop 7dtd@main                       # or whatever Slug you gave it
+rm -rf /opt/games/userdata/main
+mkdir /opt/games/userdata/main
+mv /opt/games/userdata/{Saves,GeneratedWorlds} /opt/games/userdata/main/
+chown -R sdtd:sdtd /opt/games/userdata/main
+systemctl start 7dtd@main
 ```
 
-Start the server again and it picks up where it left off. The address object also changes name, from `7dserver.txt` to `7dserver-<slug>.txt`, so anyone reading it needs the new key. Pre-templated systemd units (`7dtd.service`, `7dtd-login-notify.service`) are stopped and removed by the bootstrap itself, so a stack update does not leave one holding the game port.
+Keep the `GameName` you deployed with (`SevenDaysOnAws` unless you changed it), because the save lives at `Saves/<GameWorld>/<GameName>/` and a new name means a new world even after the folders move.
+
+Two smaller changes: the address object is renamed from `7dserver.txt` to `7dserver-<slug>.txt`, so anything reading it needs the new key; and `WebDashboardPort` now defaults to 8200 rather than 8080, which CloudFormation applies to any parameter you do not pass explicitly. Pre-templated systemd units (`7dtd.service`, `7dtd-login-notify.service`) are stopped and removed by the bootstrap itself, so a stack update does not leave one holding the game port.
 
 ## Backups
 `backup.yml` provides two independent layers of protection for the world saves, both retained for 14 days by default (`RetentionDays`):

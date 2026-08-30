@@ -24,39 +24,21 @@ PARAMS = {
     'AWS::Region': 'us-east-1',
     'AddressObjectPrefix': '7dserver-',
     'AdminPassword': 'tOpS3cretC0nsole',
-    'AdminPermissionLevel': '0',
-    'AdminSteamIds': '',
     'AutoShutdown': 'enabled',
     'BackupIntervalHours': '24',
     'DailyRefresh': 'enabled',
     'DailyRefreshTime': '15:00',
-    'GameName': 'SevenDaysOnAws',
     'GamePassword': 'none',
-    'GameWorld': 'RWG',
     'HealthCheckFailureThreshold': '3',
     'HealthCheckMinutes': '5',
     'IdleCheckMinutes': '20',
     'IdleGraceMinutes': '120',
     'NotifyTopic': 'arn:aws:sns:us-east-1:111111111111:topic',
-    'PlayerKillingMode': '2',
     'PortNumber': '26900',
-    'PortNumberTop': '26903',
     'S3BucketName': 'test-bucket',
-    'SandboxCode': 'AAAJABJACJADJARFBNC',
-    'ServerDescription': 'A 7 Days to Die server',
-    'ServerMaxPlayerCount': '16',
-    'ServerName': '7 Days to Die on AWS',
-    'ServerPropertyOverrides': '',
-    'ServerReservedSlots': '2',
-    'ServerReservedSlotsPermission': '100',
-    'ServerVisibility': '2',
-    'ServerWebsiteURL': '',
     'Servers': '[{"Slug":"main"}]',
     'TelnetPort': '8081',
-    'WebDashboardEnabled': 'true',
     'WebDashboardPort': '8200',
-    'WorldGenSeed': 'SevenDaysOnAws',
-    'WorldGenSize': '6144',
 }
 
 SUPERVISION = ('7dtd-idle-check', '7dtd-health-check', '7dtd-daily-refresh')
@@ -140,9 +122,8 @@ PREAMBLE = '''#!/bin/bash
 set -euxo pipefail
 ROOT=$1
 SERVERS_JSON=$2
-PORT_TOP=${3:-26903}
-TELNET_BASE=${4:-8081}
-DASH_BASE=${5:-8200}
+TELNET_BASE=${3:-8081}
+DASH_BASE=${4:-8200}
 mkdir -p "$ROOT/etc/7dtd" "$ROOT/opt/games/userdata" "$ROOT/run"
 PUBLIC_IP=203.0.113.10
 SERVER_REGION=Oceania
@@ -169,7 +150,6 @@ def main():
     body = sandbox(section(script, '# --- The server set',
                            '# --- Telnet console reader'))
     body = (body
-            .replace('26903', '$PORT_TOP')
             .replace('(( 8081 +', '(( TELNET_BASE +')
             .replace('(( 8200 +', '(( DASH_BASE +')
             .replace('cat > $ROOT/run/7dtd-servers.json <<\'SERVERSJSON\'\n'

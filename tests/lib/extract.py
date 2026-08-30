@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""Pull the runnable pieces of instance.yml's bootstrap out of the template.
+
+The whole server bootstrap lives as one Fn::Sub scalar inside the launch
+template's CloudFormation::Init metadata, so nothing in it can be executed - or
+linted - without first resolving the ${Parameter} references CloudFormation
+would substitute at deploy time. This resolves them against fixed test values,
+then carves out the two pieces the suites drive: the server-set section (port
+allocation, validation, per-server config generation) and the supervision
+scripts (idle, self-heal, daily refresh).
+
+Paths are rewritten to sit under a $ROOT the tests own, and the calls that need
+a real host - chown to a game user, systemctl - are neutered, so a suite runs
+as an ordinary user on macOS or Linux.
+"""
+import os
+import re
+import sys
+
+# What CloudFormation would substitute. Real defaults where the value matters
+# to a test (the inheritance checks compare against these), obvious markers
+# where it does not.
+PARAMS = {
+    'AWS::Region': 'us-east-1',
+    'AddressObjectPrefix': '7dserver-',
+    'AdminPassword': 'tOpS3cretC0nsole',
+    'AdminPermissionLevel': '0',
+    'AdminSteamIds': '',
+    'AutoShutdown': 'enabled',
+    'BackupIntervalHours': '24',
+    'DailyRefresh': 'enabled',
+    'DailyRefreshTime': '15:00',
+    'GameName': 'SevenDaysOnAws',
+    'GamePassword': 'none',
+    'GameWorld': 'RWG',
+    'HealthCheckFailureThreshold': '3',
+    'HealthCheckMinutes': '5',
+    'IdleCheckMinutes': '20',
+    'IdleGraceMinutes': '120',
+    'NotifyTopic': 'arn:aws:sns:us-east-1:111111111111:topic',
+    'PlayerKillingMode': '2',
+    'PortNumber': '26900',
+    'PortNumberTop': '26903',
+    'S3BucketName': 'test-bucket',
+    'SandboxCode': 'AAAJABJACJADJARFBNC',
+    'ServerDescription': 'A 7 Days to Die server',
+    'ServerMaxPlayerCount': '16',
+    'ServerName': '7 Days to Die on AWS',
+    'ServerPropertyOverrides': '',
+    'ServerReservedSlots': '2',
+    'ServerReservedSlotsPermission': '100',
+    'ServerVisibility': '2',
+    'ServerWebsiteURL': '',
+    'Servers': '[{"Slug":"main"}]',
+    'TelnetPort': '8081',
+    'WebDashboardEnabled': 'true',
+    'WebDashboardPort': '8200',
+    'WorldGenSeed': 'SevenDaysOnAws',
+    'WorldGenSize': '6144',
+}
+
+SUPERVISION = ('7dtd-idle-check', '7dtd-health-check', '7dtd-daily-refresh')
+
+
+def bootstrap_script(template):
+    """The /opt/bootstrap/run.sh Fn::Sub block, dedented."""
+    lines = template.split('\n')
+    start = next(i for i, l in enumerate(lines)
+                 if l.strip() == '/opt/bootstrap/run.sh:')
+    sub = next(i for i in range(start, len(lines))
+               if lines[i].strip() == 'Fn::Sub: |')
+    indent = len(lines[sub + 1]) - len(lines[sub + 1].lstrip())
+    body, i = [], sub + 1
+    while i < len(lines) and (lines[i].startswith(' ' * indent)
+                              or not lines[i].strip()):
+        body.append(lines[i][indent:])
+        i += 1
+    while body and not body[-1].strip():
+        body.pop()
+    return '\n'.join(body)
+
+
+def resolve(script):
+    unresolved = []
+
+    def one(m):
+        ref = m.group(1)
+        if ref.startswith('!'):       # ${!X} is a literal ${X} for the shell
+            return '${' + ref[1:] + '}'
+        if ref in PARAMS:
+            return PARAMS[ref]
+        unresolved.append(ref)
+        return 'UNRESOLVED_' + ref
+
+    out = re.sub(r'\$\{([^}]*)\}', one, script)
+    if unresolved:
+        sys.exit('extract: no test value for parameter(s): %s'
+                 % ', '.join(sorted(set(unresolved))))
+    return out
+
+
+def section(script, start_marker, end_marker):
+    lines = script.split('\n')
+    a = next(i for i, l in enumerate(lines) if l.startswith(start_marker))
+    b = next(i for i, l in enumerate(lines) if l.startswith(end_marker))
+    return '\n'.join(lines[a:b])
+
+
+def embedded(script, name):
+    """One of the scripts the bootstrap writes with a quoted heredoc."""
+    lines = script.split('\n')
+    for i, line in enumerate(lines):
+        m = re.match(r"^cat > /usr/local/bin/%s <<'([A-Z]+)'$" % re.escape(name),
+                     line)
+        if not m:
+            continue
+        tag, body, j = m.group(1), [], i + 1
+        while lines[j].strip() != tag:
+            body.append(lines[j])
+            j += 1
+        return '\n'.join(body)
+    sys.exit('extract: %s not found in the bootstrap' % name)
+
+
+def sandbox(text):
+    """Rewrite absolute paths under $ROOT and drop the host-only calls."""
+    return (text
+            .replace('/usr/local/bin/', '$ROOT/bin/')
+            .replace('/etc/7dtd', '$ROOT/etc/7dtd')
+            .replace('/opt/games', '$ROOT/opt/games')
+            .replace('/run/7dtd', '$ROOT/run/7dtd')
+            .replace('/etc/systemd/system', '$ROOT/etc/systemd/system')
+            .replace('install -d -o sdtd -g sdtd', 'install -d')
+            .replace('install -m 0640 -o root -g sdtd', 'install -m 0640')
+            .replace('chown sdtd:sdtd', 'true'))
+
+
+PREAMBLE = '''#!/bin/bash
+# Generated by tests/lib/extract.py from instance.yml - do not edit.
+set -euxo pipefail
+ROOT=$1
+SERVERS_JSON=$2
+PORT_TOP=${3:-26903}
+TELNET_BASE=${4:-8081}
+DASH_BASE=${5:-8200}
+mkdir -p "$ROOT/etc/7dtd" "$ROOT/opt/games/userdata" "$ROOT/run"
+PUBLIC_IP=203.0.113.10
+SERVER_REGION=Oceania
+systemctl() { echo "STUB systemctl $*"; }
+# BSD sed wants an explicit empty backup suffix; the Ubuntu host has GNU sed.
+if ! command sed --version >/dev/null 2>&1; then
+  sed() {
+    if [ "$1" = "-i" ]; then shift; command sed -i '' "$@"; else command sed "$@"; fi
+  }
+fi
+'''
+
+
+def main():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    build = os.path.join(root, 'build')
+    template = open(os.path.join(os.path.dirname(root), 'instance.yml')).read()
+    script = resolve(bootstrap_script(template))
+    os.makedirs(os.path.join(build, 'bin'), exist_ok=True)
+    open(os.path.join(build, 'run.sh'), 'w').write(script + '\n')
+
+    # The server-set section, with its port bases and security-group ceiling
+    # lifted into arguments so a suite can drive them.
+    body = sandbox(section(script, '# --- The server set',
+                           '# --- Telnet console reader'))
+    body = (body
+            .replace('26903', '$PORT_TOP')
+            .replace('(( 8081 +', '(( TELNET_BASE +')
+            .replace('(( 8200 +', '(( DASH_BASE +')
+            .replace('cat > $ROOT/run/7dtd-servers.json <<\'SERVERSJSON\'\n'
+                     '[{"Slug":"main"}]\nSERVERSJSON',
+                     'printf \'%s\\n\' "$SERVERS_JSON" > $ROOT/run/7dtd-servers.json'))
+    open(os.path.join(build, 'server-set.sh'), 'w').write(PREAMBLE + body + '\n')
+
+    for name in SUPERVISION:
+        text = sandbox(embedded(script, name)).replace(
+            '#!/bin/bash', '#!/bin/bash\nROOT=${ROOT:?}', 1)
+        path = os.path.join(build, 'bin', name)
+        open(path, 'w').write(text + '\n')
+        os.chmod(path, 0o755)
+
+    print('extracted %d lines of bootstrap to %s'
+          % (len(script.split('\n')), build))
+
+
+if __name__ == '__main__':
+    main()

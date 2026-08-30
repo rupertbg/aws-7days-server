@@ -237,16 +237,20 @@ The volume only exists on a running instance, and `cfn-hup` re-runs the bootstra
 1. `7days.bat stop`, or wait for the idle shutdown. Updating while the server is up disconnects players mid-session when the old unit is stopped.
 2. Update the stack. Drop `AddressObjectKey`, `PortNumber`, `PortNumberTop` and the per-server parameters from your update command - they no longer exist, and passing one fails the call. Move the per-server values into `Servers` instead.
 3. `7days.bat start`. The server comes up on a freshly generated world; do not let anyone join yet.
-4. Open a Session Manager shell and move the save into place:
+4. Open a Session Manager shell and move the save into place. **The server must be stopped before the `mv`.** A running server holds the freshly generated world in memory and its next autosave writes that over whatever you just moved in - `vehicles.dat` and `power.dat` first, so your vehicles and everything inside your generators and battery banks disappear while the terrain and your base survive and make it look like the move worked. The guard below refuses to continue rather than let that happen:
 
 ```bash
-systemctl stop 7dtd@main                       # or whatever Slug you gave it
-rm -rf /opt/games/userdata/main
-mkdir /opt/games/userdata/main
-mv /opt/games/userdata/{Saves,GeneratedWorlds} /opt/games/userdata/main/
-chown -R sdtd:sdtd /opt/games/userdata/main
-systemctl start 7dtd@main
+SLUG=main                                      # or whatever Slug you gave it
+systemctl stop "7dtd@$SLUG"
+systemctl is-active --quiet "7dtd@$SLUG" && echo "STILL RUNNING - do not continue"
+rm -rf "/opt/games/userdata/$SLUG"
+mkdir "/opt/games/userdata/$SLUG"
+mv /opt/games/userdata/{Saves,GeneratedWorlds} "/opt/games/userdata/$SLUG/"
+chown -R sdtd:sdtd "/opt/games/userdata/$SLUG"
+systemctl start "7dtd@$SLUG"
 ```
+
+If you do hit it, the save is recoverable: the last S3 archive from before the migration has an intact `vehicles.dat` and `power.dat`. Extract it and copy its `Saves` over the damaged one with the server stopped.
 
 Keep the `GameName` you deployed with (`SevenDaysOnAws` unless you changed it), because the save lives at `Saves/<GameWorld>/<GameName>/` and a new name means a new world even after the folders move.
 
